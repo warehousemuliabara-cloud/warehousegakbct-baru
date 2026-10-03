@@ -1,0 +1,10 @@
+{
+  "name": "GA Warehouse Muliabara & Barcode Scan",
+  "description": "Sistem manajemen stok barang gudang GA, monitoring transaksi mutasi keluar & masuk, grafik statistik 3D bulanan, dan cetak & scan barcode terintegrasi.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

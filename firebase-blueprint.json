@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "WarehouseState": {
+      "title": "WarehouseState",
+      "description": "Comprehensive warehouse state including inventory items, transactions, employees, users, loans, and audit logs.",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "description": "List of warehouse inventory items"
+        },
+        "transactions": {
+          "type": "array",
+          "description": "Log of warehouse transactions"
+        },
+        "employees": {
+          "type": "array",
+          "description": "Directory of personnel"
+        },
+        "users": {
+          "type": "array",
+          "description": "List of authorized system user accounts"
+        },
+        "loans": {
+          "type": "array",
+          "description": "Active and returned item loans"
+        },
+        "auditLogs": {
+          "type": "array",
+          "description": "System activity audit trails"
+        },
+        "rolePermissions": {
+          "type": "object",
+          "description": "RBAC permission mapping"
+        },
+        "dashboardConfig": {
+          "type": "object",
+          "description": "Dashboard and UI branding configuration"
+        },
+        "lastUpdated": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "Name of user who made the last change"
+        }
+      },
+      "required": ["lastUpdated"]
+    }
+  },
+  "firestore": {
+    "/warehouses/{warehouseId}": {
+      "schema": "WarehouseState",
+      "description": "Master warehouse document store"
+    }
+  }
+}
