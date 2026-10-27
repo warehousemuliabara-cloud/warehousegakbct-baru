@@ -218,6 +218,7 @@ export interface WarehouseSyncPayload {
   deletedLoanIds?: string[];
   deletedUserIds?: string[];
   deletedItemIds?: string[];
+  deletedEmployeeIds?: string[];
   employees: any[];
   users: any[];
   loans: any[];
@@ -474,6 +475,106 @@ export function deduplicateItemsList(list: any[], deletedItemIds?: string[]): an
           id: existing.id || item.id, // maintain stable client ID
           rackLocation: item.rackLocation && String(item.rackLocation).toLowerCase().includes('kayu') ? 'Gudang Kayu' : 'Gudang GA',
         });
+      }
+    }
+  });
+  return Array.from(map.values());
+}
+
+const STORAGE_KEY_DELETED_EMPLOYEES = 'ga_warehouse_deleted_employee_ids_v1';
+
+export function getDeletedEmployeeIds(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DELETED_EMPLOYEES);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function recordDeletedEmployeeId(empId: string, name?: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    const current = getDeletedEmployeeIds();
+    const set = new Set(Array.isArray(current) ? current : []);
+    if (empId) {
+      set.add(empId);
+      set.add(String(empId).toLowerCase().trim());
+    }
+    if (name) {
+      set.add(name);
+      set.add(String(name).toLowerCase().trim().replace(/\s+/g, ' '));
+    }
+    const updated = Array.from(set).slice(-1000);
+    localStorage.setItem(STORAGE_KEY_DELETED_EMPLOYEES, JSON.stringify(updated));
+  } catch (e) {
+    console.warn('Failed to record deleted employee id:', e);
+  }
+}
+
+export function recordDeletedEmployeeIds(idsOrNames: string[]) {
+  if (typeof window === 'undefined' || !Array.isArray(idsOrNames)) return;
+  try {
+    const current = getDeletedEmployeeIds();
+    const set = new Set(Array.isArray(current) ? current : []);
+    idsOrNames.forEach((val) => {
+      if (val) {
+        set.add(val);
+        set.add(String(val).toLowerCase().trim());
+      }
+    });
+    const updated = Array.from(set).slice(-1000);
+    localStorage.setItem(STORAGE_KEY_DELETED_EMPLOYEES, JSON.stringify(updated));
+  } catch (e) {
+    console.warn('Failed to record deleted employee IDs:', e);
+  }
+}
+
+export function clearDeletedEmployeeIds() {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(STORAGE_KEY_DELETED_EMPLOYEES);
+  } catch {}
+}
+
+export function isEmployeeDeleted(emp: any, deletedIds?: any): boolean {
+  if (!emp) return true;
+  const list = Array.isArray(deletedIds) ? deletedIds : getDeletedEmployeeIds();
+  const deletedSet = new Set(
+    (Array.isArray(list) ? list : []).map((s: any) => String(s).toLowerCase().trim().replace(/\s+/g, ' '))
+  );
+  const id = emp.id ? String(emp.id).toLowerCase().trim() : '';
+  const name = emp.name ? String(emp.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
+
+  if (id && deletedSet.has(id)) return true;
+  if (name && deletedSet.has(name)) return true;
+  return false;
+}
+
+export function deduplicateEmployees(list: any[], deletedEmployeeIds?: string[]): any[] {
+  if (!Array.isArray(list)) return [];
+  const map = new Map<string, any>();
+  const listDeleted = Array.isArray(deletedEmployeeIds) ? deletedEmployeeIds : getDeletedEmployeeIds();
+  const deletedSet = new Set(listDeleted.map(s => String(s).toLowerCase().trim().replace(/\s+/g, ' ')));
+
+  list.forEach((emp, index) => {
+    if (!emp || typeof emp !== 'object') return;
+    if (isEmployeeDeleted(emp, listDeleted)) return;
+    const name = emp.name ? String(emp.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
+    const id = emp.id ? String(emp.id).toLowerCase().trim() : '';
+    const key = name || id || `emp_idx_${index}`;
+
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, emp);
+    } else {
+      const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      const newTime = new Date(emp.updatedAt || emp.createdAt || 0).getTime();
+      if (newTime >= existingTime) {
+        map.set(key, { ...existing, ...emp, id: existing.id || emp.id });
       }
     }
   });
@@ -1091,10 +1192,26 @@ export function smartMergeWarehouseData(
   const mergedItems = deduplicateItemsList(rawCombined, allDeletedItemIds);
 
   // 4. Employees & Users
-  const empMap = new Map<string, any>();
-  (localObj.employees || []).forEach((e: any) => { if (e.id || e.name) empMap.set(e.id || e.name, e); });
-  (remoteObj.employees || []).forEach((e: any) => { if (e.id || e.name) empMap.set(e.id || e.name, e); });
-  const mergedEmployees = Array.from(empMap.values());
+  const localDeletedEmployees = getDeletedEmployeeIds();
+  const remoteDeletedEmployees = Array.isArray(remoteObj.deletedEmployeeIds) ? remoteObj.deletedEmployeeIds : [];
+  const payloadLocalDeletedEmployees = Array.isArray(localObj.deletedEmployeeIds) ? localObj.deletedEmployeeIds : [];
+
+  const allDeletedEmployeeIds = Array.from(new Set([
+    ...localDeletedEmployees,
+    ...remoteDeletedEmployees,
+    ...payloadLocalDeletedEmployees,
+  ])).slice(-1000);
+
+  if (typeof window !== 'undefined' && allDeletedEmployeeIds.length > 0) {
+    try {
+      localStorage.setItem(STORAGE_KEY_DELETED_EMPLOYEES, JSON.stringify(allDeletedEmployeeIds));
+    } catch {}
+  }
+
+  const localEmployees = Array.isArray(localObj.employees) ? localObj.employees : [];
+  const remoteEmployees = Array.isArray(remoteObj.employees) ? remoteObj.employees : [];
+  const rawEmpCombined = [...localEmployees, ...remoteEmployees];
+  const mergedEmployees = deduplicateEmployees(rawEmpCombined, allDeletedEmployeeIds);
 
   // 4b. BIDIRECTIONAL UNION MERGE FOR USERS WITH STRICT TOMBSTONE FILTERING & DEDUPLICATION
   const localDeletedUsers = getDeletedUserIds();
@@ -1148,7 +1265,8 @@ export function smartMergeWarehouseData(
     deletedLoanIds: Array.from(allDeletedLoanSet).slice(-500),
     deletedUserIds: allDeletedUserIds,
     deletedItemIds: allDeletedItemIds,
-    employees: mergedEmployees.length > 0 ? mergedEmployees : (remoteObj.employees || localObj.employees || []),
+    deletedEmployeeIds: allDeletedEmployeeIds,
+    employees: mergedEmployees,
     users: mergedUsers,
     loans: mergedLoans,
     auditLogs: mergedAuditLogs,
@@ -1200,6 +1318,7 @@ export async function fetchFreshWarehouseData(
         deletedLoanIds: getDeletedLoanIds(),
         deletedUserIds: getDeletedUserIds(),
         deletedItemIds: getDeletedItemIds(),
+        deletedEmployeeIds: getDeletedEmployeeIds(),
         employees: currentLocal.employees || [],
         users: currentLocal.users || [],
         loans: currentLocal.loans || [],

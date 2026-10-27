@@ -102,7 +102,12 @@ import {
   isUserDeleted,
   deduplicateItemsList,
   deduplicateUsers,
+  deduplicateEmployees,
   recordDeletedItemId,
+  recordDeletedEmployeeId,
+  getDeletedEmployeeIds,
+  clearDeletedEmployeeIds,
+  isEmployeeDeleted,
   isItemDeleted,
   recordDeletedUserId,
   SyncState,
@@ -222,7 +227,18 @@ export default function App() {
   const [employees, setEmployees] = useState<Employee[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_EMPLOYEES);
-      return saved ? JSON.parse(saved) : INITIAL_EMPLOYEES;
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const filtered = deduplicateEmployees(Array.isArray(parsed) ? parsed : INITIAL_EMPLOYEES, getDeletedEmployeeIds());
+        if (filtered.length > 0) {
+          return filtered;
+        }
+      }
+      clearDeletedEmployeeIds();
+      try {
+        localStorage.setItem(STORAGE_KEY_EMPLOYEES, JSON.stringify(INITIAL_EMPLOYEES));
+      } catch {}
+      return INITIAL_EMPLOYEES;
     } catch {
       return INITIAL_EMPLOYEES;
     }
@@ -922,18 +938,58 @@ export default function App() {
 
   const handleDeleteEmployee = (empId: string) => {
     const deleted = employees.find((e) => e.id === empId);
-    const nextEmployees = employees.filter((e) => e.id !== empId);
+    if (deleted) {
+      recordDeletedEmployeeId(empId, deleted.name);
+    }
+    const nextDeletedIds = getDeletedEmployeeIds();
+    const nextEmployees = employees.filter((e) => e.id !== empId && !isEmployeeDeleted(e, nextDeletedIds));
     setEmployees(nextEmployees);
-    syncToCloud({ employees: nextEmployees });
+    try {
+      localStorage.setItem(STORAGE_KEY_EMPLOYEES, JSON.stringify(nextEmployees));
+    } catch {}
+    syncToCloud({ employees: nextEmployees, deletedEmployeeIds: nextDeletedIds });
     logAudit('Hapus Data Personil', 'EMPLOYEES', `Menghapus ${deleted?.name || empId}`);
-    showToast(`Personil "${deleted?.name || empId}" telah dihapus dari database.`, 'warning');
+    showToast(`Personil "${deleted?.name || empId}" telah dihapus secara permanen.`, 'warning');
   };
 
-  const handleResetEmployees = () => {
-    setEmployees(INITIAL_EMPLOYEES);
-    syncToCloud({ employees: INITIAL_EMPLOYEES });
-    logAudit('Reset Database Personil', 'EMPLOYEES', 'Memulihkan data 114 karyawan awal');
-    showToast('Database personil telah di-reset ke data master awal (114 nama).', 'info');
+  const handleBulkDeleteEmployees = (empIds: string[]) => {
+    const names: string[] = [];
+    empIds.forEach((id) => {
+      const found = employees.find((e) => e.id === id);
+      if (found) {
+        recordDeletedEmployeeId(id, found.name);
+        names.push(found.name);
+      }
+    });
+    const nextDeletedIds = getDeletedEmployeeIds();
+    const nextEmployees = employees.filter((e) => !empIds.includes(e.id) && !isEmployeeDeleted(e, nextDeletedIds));
+    setEmployees(nextEmployees);
+    try {
+      localStorage.setItem(STORAGE_KEY_EMPLOYEES, JSON.stringify(nextEmployees));
+    } catch {}
+    syncToCloud({ employees: nextEmployees, deletedEmployeeIds: nextDeletedIds });
+    logAudit('Hapus Massal Personil', 'EMPLOYEES', `Menghapus ${names.length} personil: ${names.join(', ')}`);
+    showToast(`${names.length} data personil berhasil dihapus secara permanen.`, 'warning');
+  };
+
+  const handleBulkImportEmployees = (newEmployees: Employee[], mode: 'append' | 'replace' = 'append') => {
+    let nextEmployees: Employee[];
+    if (mode === 'replace') {
+      clearDeletedEmployeeIds();
+      nextEmployees = deduplicateEmployees(newEmployees);
+    } else {
+      nextEmployees = deduplicateEmployees([...newEmployees, ...employees]);
+    }
+
+    setEmployees(nextEmployees);
+    try {
+      localStorage.setItem(STORAGE_KEY_EMPLOYEES, JSON.stringify(nextEmployees));
+    } catch (e) {
+      console.error('Save employees error', e);
+    }
+    syncToCloud({ employees: nextEmployees });
+    logAudit('Import Excel Personil', 'EMPLOYEES', `Mengimpor ${newEmployees.length} data karyawan (${mode === 'replace' ? 'Ganti Seluruh' : 'Tambah Ke Database'})`);
+    showToast(`Berhasil mengimpor ${newEmployees.length} data karyawan (${mode === 'replace' ? 'Ganti Data' : 'Tambah Data'})!`, 'success');
   };
 
   // Barcode scan quick handler
@@ -2181,7 +2237,8 @@ export default function App() {
         onAddEmployee={handleAddEmployee}
         onUpdateEmployee={handleUpdateEmployee}
         onDeleteEmployee={handleDeleteEmployee}
-        onResetEmployees={handleResetEmployees}
+        onBulkDeleteEmployees={handleBulkDeleteEmployees}
+        onImportEmployees={handleBulkImportEmployees}
         onOpenGoogleSheets={() => setIsGoogleSheetsModalOpen(true)}
         companyName={dashboardConfig.appName || 'GUDANG GA'}
       />
