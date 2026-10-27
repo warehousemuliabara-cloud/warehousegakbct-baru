@@ -95,6 +95,9 @@ function initCrossDeviceRelay() {
         // Automatically cache authoritative data in localStorage so Netlify / fresh tab gets it immediately!
         if (typeof window !== 'undefined' && payload) {
           try {
+            if (Array.isArray(payload.deletedItemIds) && payload.deletedItemIds.length > 0) {
+              recordDeletedItemIds(payload.deletedItemIds);
+            }
             if (Array.isArray(payload.deletedUserIds) && payload.deletedUserIds.length > 0) {
               recordDeletedUserIds(payload.deletedUserIds);
             }
@@ -105,7 +108,7 @@ function initCrossDeviceRelay() {
               recordDeletedTransactionIds(payload.deletedTransactionIds);
             }
             if (Array.isArray(payload.items)) {
-              const cleanItems = deduplicateItemsList(payload.items);
+              const cleanItems = deduplicateItemsList(payload.items, getDeletedItemIds());
               localStorage.setItem('ga_warehouse_items_v11', JSON.stringify(cleanItems));
             }
             if (Array.isArray(payload.transactions)) {
@@ -118,15 +121,7 @@ function initCrossDeviceRelay() {
               localStorage.setItem('ga_warehouse_categories_v1', JSON.stringify(payload.categories));
             }
             if (Array.isArray(payload.users) && payload.users.length > 0) {
-              const deletedUserSet = new Set(getDeletedUserIds().map((s) => s.toLowerCase().trim()));
-              const cleaned = payload.users.filter((u: any) => {
-                if (!u) return false;
-                const id = u.id ? String(u.id).toLowerCase().trim() : '';
-                const username = u.username ? String(u.username).toLowerCase().trim() : '';
-                if (id && deletedUserSet.has(id)) return false;
-                if (username && deletedUserSet.has(username)) return false;
-                return true;
-              });
+              const cleaned = deduplicateUsers(payload.users, getDeletedUserIds());
               if (cleaned.length > 0) {
                 localStorage.setItem('ga_warehouse_users_v8', JSON.stringify(cleaned));
               }
@@ -222,6 +217,7 @@ export interface WarehouseSyncPayload {
   deletedTransactionIds?: string[];
   deletedLoanIds?: string[];
   deletedUserIds?: string[];
+  deletedItemIds?: string[];
   employees: any[];
   users: any[];
   loans: any[];
@@ -368,8 +364,122 @@ const STORAGE_KEY_LOCAL_LEDGER = 'ga_warehouse_trx_local_ledger_v2';
 const STORAGE_KEY_DELETED_TRX = 'ga_warehouse_deleted_trx_ids_v1';
 const STORAGE_KEY_DELETED_LOANS = 'ga_warehouse_deleted_loan_ids_v1';
 const STORAGE_KEY_DELETED_USERS = 'ga_warehouse_deleted_user_ids_v8';
+const STORAGE_KEY_DELETED_ITEMS = 'ga_warehouse_deleted_item_ids_v1';
 
-// User Tombstone Management: Track deleted user accounts so they NEVER reappear across devices, Firestore, or Netlify
+export function getDeletedItemIds(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DELETED_ITEMS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function recordDeletedItemId(itemId: string, code?: string, name?: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    const current = getDeletedItemIds();
+    const set = new Set(Array.isArray(current) ? current : []);
+    if (itemId) {
+      set.add(itemId);
+      set.add(String(itemId).toLowerCase().trim());
+    }
+    if (code) {
+      set.add(code);
+      set.add(String(code).toUpperCase().trim().replace(/[\s\-_]+/g, ''));
+    }
+    if (name) {
+      set.add(name);
+      set.add(String(name).toLowerCase().trim().replace(/\s+/g, ' '));
+    }
+    const updated = Array.from(set).slice(-1000);
+    localStorage.setItem(STORAGE_KEY_DELETED_ITEMS, JSON.stringify(updated));
+  } catch (e) {
+    console.warn('Failed to record deleted item id:', e);
+  }
+}
+
+export function recordDeletedItemIds(idsOrCodes: string[]) {
+  if (typeof window === 'undefined' || !Array.isArray(idsOrCodes)) return;
+  try {
+    const current = getDeletedItemIds();
+    const set = new Set(Array.isArray(current) ? current : []);
+    idsOrCodes.forEach((val) => {
+      if (val) {
+        set.add(val);
+        set.add(String(val).toLowerCase().trim());
+      }
+    });
+    const updated = Array.from(set).slice(-1000);
+    localStorage.setItem(STORAGE_KEY_DELETED_ITEMS, JSON.stringify(updated));
+  } catch (e) {
+    console.warn('Failed to record deleted item IDs:', e);
+  }
+}
+
+export function clearDeletedItemIds() {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(STORAGE_KEY_DELETED_ITEMS);
+  } catch {}
+}
+
+export function isItemDeleted(item: any, deletedIds?: any): boolean {
+  if (!item) return true;
+  const list = Array.isArray(deletedIds) ? deletedIds : getDeletedItemIds();
+  const deletedSet = new Set(
+    (Array.isArray(list) ? list : []).map((s: any) => String(s).toLowerCase().trim().replace(/[\s\-_]+/g, ''))
+  );
+  const id = item.id ? String(item.id).toLowerCase().trim() : '';
+  const code = item.code ? String(item.code).toLowerCase().trim().replace(/[\s\-_]+/g, '') : '';
+  const name = item.name ? String(item.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
+  const nameNoSpace = item.name ? String(item.name).toLowerCase().trim().replace(/[\s\-_]+/g, '') : '';
+
+  if (id && deletedSet.has(id)) return true;
+  if (code && (deletedSet.has(code) || deletedSet.has(String(item.code || '').toUpperCase().trim().replace(/[\s\-_]+/g, '')))) return true;
+  if (name && (deletedSet.has(name) || deletedSet.has(nameNoSpace))) return true;
+  return false;
+}
+
+export function deduplicateItemsList(list: any[], deletedItemIds?: string[]): any[] {
+  if (!Array.isArray(list)) return [];
+  const map = new Map<string, any>();
+  list.forEach((item, index) => {
+    if (!item || typeof item !== 'object') return;
+    if (isItemDeleted(item, deletedItemIds)) return;
+    const code = item.code ? String(item.code).toUpperCase().trim().replace(/[\s\-_]+/g, '') : '';
+    const name = item.name ? String(item.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
+    const cat = item.category ? String(item.category).toLowerCase().trim() : '';
+    const id = item.id ? String(item.id).toLowerCase().trim() : '';
+    
+    // Canonical deduplication key (Items with same item code or same name+category will NEVER duplicate)
+    const key = code ? `code_${code}` : (name ? `name_${name}_${cat}` : (id ? `id_${id}` : `item_idx_${index}`));
+    
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        ...item,
+        rackLocation: item.rackLocation && String(item.rackLocation).toLowerCase().includes('kayu') ? 'Gudang Kayu' : 'Gudang GA',
+      });
+    } else {
+      const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      const newTime = new Date(item.updatedAt || item.createdAt || 0).getTime();
+      if (newTime >= existingTime) {
+        map.set(key, {
+          ...existing,
+          ...item,
+          id: existing.id || item.id, // maintain stable client ID
+          rackLocation: item.rackLocation && String(item.rackLocation).toLowerCase().includes('kayu') ? 'Gudang Kayu' : 'Gudang GA',
+        });
+      }
+    }
+  });
+  return Array.from(map.values());
+}
+
 export function getDeletedUserIds(): string[] {
   if (typeof window === 'undefined') return [];
   try {
@@ -382,7 +492,7 @@ export function getDeletedUserIds(): string[] {
   }
 }
 
-export function recordDeletedUserId(userId: string, username?: string) {
+export function recordDeletedUserId(userId: string, username?: string, fullName?: string) {
   if (typeof window === 'undefined') return;
   try {
     const current = getDeletedUserIds();
@@ -391,6 +501,9 @@ export function recordDeletedUserId(userId: string, username?: string) {
     if (username) {
       set.add(username);
       set.add(username.toLowerCase().trim());
+    }
+    if (fullName) {
+      set.add(fullName.toLowerCase().trim());
     }
     const updated = Array.from(set).slice(-500);
     localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(updated));
@@ -407,7 +520,7 @@ export function recordDeletedUserIds(idsAndUsernames: string[]) {
     idsAndUsernames.forEach((id) => {
       if (id) {
         set.add(id);
-        set.add(id.toLowerCase().trim());
+        set.add(String(id).toLowerCase().trim());
       }
     });
     const updated = Array.from(set).slice(-500);
@@ -446,39 +559,45 @@ export function isUserDeleted(u: any, deletedIds?: any): boolean {
   return false;
 }
 
-export function deduplicateItemsList(list: any[]): any[] {
+export function deduplicateUsers(list: any[], deletedUserIds?: string[]): any[] {
   if (!Array.isArray(list)) return [];
-  const map = new Map<string, any>();
-  list.forEach((item, index) => {
-    if (!item || typeof item !== 'object') return;
-    const code = item.code ? String(item.code).toUpperCase().trim().replace(/[\s\-_]+/g, '') : '';
-    const name = item.name ? String(item.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
-    const cat = item.category ? String(item.category).toLowerCase().trim() : '';
-    const id = item.id ? String(item.id).toLowerCase().trim() : '';
-    
-    // Canonical deduplication key (Items with same item code or same name+category will NEVER duplicate)
-    const key = code ? `code_${code}` : (name ? `name_${name}_${cat}` : (id ? `id_${id}` : `item_idx_${index}`));
-    
-    const existing = map.get(key);
+  const userMap = new Map<string, any>();
+  const listDeleted = Array.isArray(deletedUserIds) ? deletedUserIds : getDeletedUserIds();
+  const deletedUserSet = new Set(listDeleted.map(s => String(s).toLowerCase().trim()));
+
+  list.forEach((u: any) => {
+    if (!u || typeof u !== 'object') return;
+    const id = u.id ? String(u.id).toLowerCase().trim() : '';
+    const username = u.username ? String(u.username).toLowerCase().trim() : '';
+    const fullName = u.fullName ? String(u.fullName).toLowerCase().trim() : '';
+
+    if (id && deletedUserSet.has(id)) return;
+    if (username && deletedUserSet.has(username)) return;
+    if (fullName && deletedUserSet.has(fullName)) return;
+
+    const key = username || id;
+    if (!key) return;
+
+    const existing = userMap.get(key);
     if (!existing) {
-      map.set(key, {
-        ...item,
-        rackLocation: item.rackLocation && String(item.rackLocation).toLowerCase().includes('kayu') ? 'Gudang Kayu' : 'Gudang GA',
-      });
+      userMap.set(key, u);
     } else {
-      const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
-      const newTime = new Date(item.updatedAt || item.createdAt || 0).getTime();
-      if (newTime >= existingTime) {
-        map.set(key, {
-          ...existing,
-          ...item,
-          id: existing.id || item.id, // maintain stable client ID
-          rackLocation: item.rackLocation && String(item.rackLocation).toLowerCase().includes('kayu') ? 'Gudang Kayu' : 'Gudang GA',
-        });
+      const existingIsMaster = existing.role === 'MASTER_ADMIN';
+      const currentIsMaster = u.role === 'MASTER_ADMIN';
+      if (currentIsMaster && !existingIsMaster) {
+        userMap.set(key, u);
+      } else if (u.password && !existing.password) {
+        userMap.set(key, u);
+      } else {
+        const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+        const newTime = new Date(u.updatedAt || u.createdAt || 0).getTime();
+        if (newTime >= existingTime) {
+          userMap.set(key, { ...existing, ...u, id: existing.id || u.id });
+        }
       }
     }
   });
-  return Array.from(map.values());
+  return Array.from(userMap.values()).filter((u: any) => !isUserDeleted(u, listDeleted));
 }
 
 // Loan Tombstone Management: Track deleted loans so they NEVER reappear across devices or on other transactions
@@ -949,11 +1068,27 @@ export function smartMergeWarehouseData(
     .filter((l: any) => !isLoanDeleted(l))
     .sort((a, b) => new Date(b.loanDate || 0).getTime() - new Date(a.loanDate || 0).getTime());
 
-  // 3. ROBUST CANONICAL DEDUPLICATION & MERGE FOR ITEMS (Preserves all items & 100% prevents duplicates)
+  // 3. ROBUST CANONICAL DEDUPLICATION & MERGE FOR ITEMS WITH STRICT TOMBSTONE FILTERING
+  const localDeletedItems = getDeletedItemIds();
+  const remoteDeletedItems = Array.isArray(remoteObj.deletedItemIds) ? remoteObj.deletedItemIds : [];
+  const payloadLocalDeletedItems = Array.isArray(localObj.deletedItemIds) ? localObj.deletedItemIds : [];
+
+  const allDeletedItemIds = Array.from(new Set([
+    ...localDeletedItems,
+    ...remoteDeletedItems,
+    ...payloadLocalDeletedItems,
+  ])).slice(-1000);
+
+  if (typeof window !== 'undefined' && allDeletedItemIds.length > 0) {
+    try {
+      localStorage.setItem(STORAGE_KEY_DELETED_ITEMS, JSON.stringify(allDeletedItemIds));
+    } catch {}
+  }
+
   const localItems = Array.isArray(localObj.items) ? localObj.items : [];
   const remoteItems = Array.isArray(remoteObj.items) ? remoteObj.items : [];
   const rawCombined = [...localItems, ...remoteItems];
-  const mergedItems = deduplicateItemsList(rawCombined);
+  const mergedItems = deduplicateItemsList(rawCombined, allDeletedItemIds);
 
   // 4. Employees & Users
   const empMap = new Map<string, any>();
@@ -961,7 +1096,7 @@ export function smartMergeWarehouseData(
   (remoteObj.employees || []).forEach((e: any) => { if (e.id || e.name) empMap.set(e.id || e.name, e); });
   const mergedEmployees = Array.from(empMap.values());
 
-  // 4b. BIDIRECTIONAL UNION MERGE FOR USERS WITH STRICT TOMBSTONE FILTERING
+  // 4b. BIDIRECTIONAL UNION MERGE FOR USERS WITH STRICT TOMBSTONE FILTERING & DEDUPLICATION
   const localDeletedUsers = getDeletedUserIds();
   const remoteDeletedUsers = Array.isArray(remoteObj.deletedUserIds) ? remoteObj.deletedUserIds : [];
   const payloadLocalDeletedUsers = Array.isArray(localObj.deletedUserIds) ? localObj.deletedUserIds : [];
@@ -972,45 +1107,14 @@ export function smartMergeWarehouseData(
     ...payloadLocalDeletedUsers,
   ])).slice(-500);
 
-  const allDeletedUserSet = new Set(allDeletedUserIds.map((s: string) => String(s).toLowerCase().trim()));
-
   if (typeof window !== 'undefined' && allDeletedUserIds.length > 0) {
     try {
       localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(allDeletedUserIds));
     } catch {}
   }
 
-  const isUserDeleted = (u: any): boolean => {
-    if (!u) return true;
-    const id = u.id ? String(u.id).toLowerCase().trim() : '';
-    const username = u.username ? String(u.username).toLowerCase().trim() : '';
-    if (id && allDeletedUserSet.has(id)) return true;
-    if (username && allDeletedUserSet.has(username)) return true;
-    return false;
-  };
-
-  const userMap = new Map<string, any>();
-  (localObj.users || []).forEach((u: any) => {
-    if (!u || isUserDeleted(u)) return;
-    const key = u.id || u.username;
-    if (key) userMap.set(key, u);
-  });
-  (remoteObj.users || []).forEach((u: any) => {
-    if (!u || isUserDeleted(u)) return;
-    const key = u.id || u.username;
-    if (!key) return;
-    const existing = userMap.get(key);
-    if (!existing) {
-      userMap.set(key, u);
-    } else {
-      const remoteTime = new Date(u.updatedAt || u.createdAt || 0).getTime();
-      const localTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
-      if (remoteTime >= localTime) {
-        userMap.set(key, u);
-      }
-    }
-  });
-  const mergedUsers = Array.from(userMap.values()).filter((u: any) => !isUserDeleted(u));
+  const rawUsers = [...(localObj.users || []), ...(remoteObj.users || [])];
+  const mergedUsers = deduplicateUsers(rawUsers, allDeletedUserIds);
 
   // 5. Audit logs
   const logMap = new Map<string, any>();
@@ -1043,6 +1147,7 @@ export function smartMergeWarehouseData(
     deletedTransactionIds: Array.from(allDeletedSet).slice(-500),
     deletedLoanIds: Array.from(allDeletedLoanSet).slice(-500),
     deletedUserIds: allDeletedUserIds,
+    deletedItemIds: allDeletedItemIds,
     employees: mergedEmployees.length > 0 ? mergedEmployees : (remoteObj.employees || localObj.employees || []),
     users: mergedUsers,
     loans: mergedLoans,
@@ -1094,6 +1199,7 @@ export async function fetchFreshWarehouseData(
         deletedTransactionIds: getDeletedTransactionIds(),
         deletedLoanIds: getDeletedLoanIds(),
         deletedUserIds: getDeletedUserIds(),
+        deletedItemIds: getDeletedItemIds(),
         employees: currentLocal.employees || [],
         users: currentLocal.users || [],
         loans: currentLocal.loans || [],

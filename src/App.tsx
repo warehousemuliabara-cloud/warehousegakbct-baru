@@ -98,7 +98,13 @@ import {
   clearDeletedLoanIds,
   getDeletedUserIds,
   clearDeletedUserTombstone,
+  getDeletedItemIds,
+  isUserDeleted,
   deduplicateItemsList,
+  deduplicateUsers,
+  recordDeletedItemId,
+  isItemDeleted,
+  recordDeletedUserId,
   SyncState,
   WarehouseSyncPayload 
 } from './utils/firebaseSync';
@@ -124,9 +130,7 @@ export default function App() {
   // Helper to validate and ensure users list is safe, clean, and retains user deletions
   const sanitizeUsersList = (savedList: any): UserAccount[] => {
     if (Array.isArray(savedList) && savedList.length > 0) {
-      const valid = savedList.filter(
-        (u) => u && typeof u === 'object' && u.id && u.username
-      );
+      const valid = deduplicateUsers(savedList, getDeletedUserIds());
       if (valid.length > 0) {
         return valid;
       }
@@ -855,7 +859,10 @@ export default function App() {
       return;
     }
 
-    const nextUsers = users.filter((u) => u.id !== userId);
+    recordDeletedUserId(userToDel.id, userToDel.username, userToDel.fullName);
+    const nextDeletedUserIds = getDeletedUserIds();
+
+    const nextUsers = users.filter((u) => u.id !== userId && !isUserDeleted(u, nextDeletedUserIds));
     // Ensure safety: do not leave zero users
     const safeUsers = nextUsers.length > 0 ? nextUsers : [INITIAL_USERS[0]];
     
@@ -865,7 +872,7 @@ export default function App() {
     } catch (e) {
       console.error('Save users error', e);
     }
-    syncToCloud({ users: safeUsers });
+    syncToCloud({ users: safeUsers, deletedUserIds: nextDeletedUserIds });
     logAudit('Hapus Akun Pengguna', 'USERS', `Menghapus akun ${userToDel.fullName} (@${userToDel.username})`);
     showToast(`Akun "${userToDel.fullName}" (@${userToDel.username}) berhasil dihapus secara permanen.`, 'success');
   };
@@ -993,12 +1000,16 @@ export default function App() {
 
   const handleDeleteItem = (itemId: string) => {
     const deleted = items.find((i) => i.id === itemId);
-    const nextItems = items.filter((item) => item.id !== itemId);
+    if (deleted) {
+      recordDeletedItemId(itemId, deleted.code, deleted.name);
+    }
+    const nextDeletedIds = getDeletedItemIds();
+    const nextItems = items.filter((item) => item.id !== itemId && !isItemDeleted(item, nextDeletedIds));
     setItems(nextItems);
     try {
       localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
     } catch {}
-    syncToCloud({ items: nextItems });
+    syncToCloud({ items: nextItems, deletedItemIds: nextDeletedIds });
     logAudit('Hapus Master Barang', 'STOCK', `Menghapus item ${deleted?.name || itemId} (${deleted?.code})`);
     showToast(`Barang "${deleted?.name || itemId}" telah dihapus.`, 'warning');
   };
