@@ -692,6 +692,55 @@ export function clearDeletedUserTombstone(userId?: string, username?: string, fu
   }
 }
 
+export function cleanupDeletedUserTombstonesAgainstActiveUsers(activeUsers: any[]) {
+  if (typeof window === 'undefined' || !Array.isArray(activeUsers)) return;
+  try {
+    const activeKeys = new Set<string>();
+    activeUsers.forEach((u) => {
+      if (!u || typeof u !== 'object') return;
+      if (u.id) activeKeys.add(String(u.id).toLowerCase().trim());
+      if (u.username) {
+        const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
+        activeKeys.add(cleanU);
+        activeKeys.add(`@${cleanU}`);
+      }
+      if (u.fullName) activeKeys.add(String(u.fullName).toLowerCase().trim());
+    });
+
+    const current = getDeletedUserIds();
+    const filteredTombstones = current.filter((t) => {
+      const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
+      return !activeKeys.has(cleanT);
+    });
+
+    localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(filteredTombstones));
+  } catch (e) {
+    // safe
+  }
+}
+
+export function cleanupDeletedEmployeeTombstonesAgainstActiveEmployees(activeEmployees: any[]) {
+  if (typeof window === 'undefined' || !Array.isArray(activeEmployees)) return;
+  try {
+    const activeKeys = new Set<string>();
+    activeEmployees.forEach((emp) => {
+      if (!emp || typeof emp !== 'object') return;
+      if (emp.id) activeKeys.add(String(emp.id).toLowerCase().trim());
+      if (emp.name) activeKeys.add(String(emp.name).toLowerCase().trim().replace(/\s+/g, ' '));
+    });
+
+    const current = getDeletedEmployeeIds();
+    const filtered = current.filter((t) => {
+      const cleanT = String(t).toLowerCase().trim().replace(/\s+/g, ' ');
+      return !activeKeys.has(cleanT);
+    });
+
+    localStorage.setItem(STORAGE_KEY_DELETED_EMPLOYEES, JSON.stringify(filtered));
+  } catch (e) {
+    // safe
+  }
+}
+
 export function isUserDeleted(u: any, deletedIds?: any): boolean {
   if (!u) return true;
   const list = Array.isArray(deletedIds) ? deletedIds : getDeletedUserIds();
@@ -1572,12 +1621,19 @@ export async function pushWarehouseSync(
     }
   });
 
+  if (Array.isArray(payload.users) && payload.users.length > 0) {
+    cleanupDeletedUserTombstonesAgainstActiveUsers(payload.users);
+  }
+  if (Array.isArray(payload.employees) && payload.employees.length > 0) {
+    cleanupDeletedEmployeeTombstonesAgainstActiveEmployees(payload.employees);
+  }
+
   const deletedUserIds = Array.from(new Set([
     ...getDeletedUserIds(),
     ...(payload.deletedUserIds || []),
   ])).slice(-500);
 
-  const allDeletedUserSet = new Set(deletedUserIds.map((s) => String(s).toLowerCase().trim()));
+  const allDeletedUserSet = new Set(deletedUserIds.map((s) => String(s).toLowerCase().trim().replace(/^@/, '')));
 
   // Filter out any deleted transaction before saving to ledger or sending
   const filteredTransactions = (payload.transactions || []).filter((trx: any) => {
@@ -1601,9 +1657,9 @@ export async function pushWarehouseSync(
   const filteredUsers = (payload.users || []).filter((u: any) => {
     if (!u) return false;
     const id = u.id ? String(u.id).toLowerCase().trim() : '';
-    const username = u.username ? String(u.username).toLowerCase().trim() : '';
+    const cleanUsername = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
     if (id && allDeletedUserSet.has(id)) return false;
-    if (username && allDeletedUserSet.has(username)) return false;
+    if (cleanUsername && allDeletedUserSet.has(cleanUsername)) return false;
     return true;
   });
 
