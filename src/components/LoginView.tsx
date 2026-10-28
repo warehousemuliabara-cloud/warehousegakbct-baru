@@ -11,7 +11,14 @@ import {
 import { UserAccount } from '../types';
 import { INITIAL_USERS } from '../data/initialData';
 import { CompanyLogo } from './CompanyLogo';
-import { fetchFreshWarehouseData, subscribeToWarehouseData, getDeletedUserIds, isUserDeleted } from '../utils/firebaseSync';
+import { 
+  fetchFreshWarehouseData, 
+  subscribeToWarehouseData, 
+  getDeletedUserIds, 
+  isUserDeleted,
+  deduplicateUsers,
+  cleanupDeletedUserTombstonesAgainstActiveUsers
+} from '../utils/firebaseSync';
 
 interface LoginViewProps {
   users?: UserAccount[];
@@ -81,34 +88,17 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   // Validate and clean user list while respecting user deletions
   const sanitizeUsersList = (savedList: any): UserAccount[] => {
-    const delUserSet = new Set(getDeletedUserIds());
     if (Array.isArray(savedList) && savedList.length > 0) {
-      savedList.forEach((u: any) => {
-        if (!u) return;
-        if (u.id) { delUserSet.delete(u.id); delUserSet.delete(String(u.id).toLowerCase()); }
-        if (u.username) { delUserSet.delete(u.username); delUserSet.delete(String(u.username).trim().toLowerCase()); }
-        if (u.fullName) { delUserSet.delete(u.fullName); delUserSet.delete(String(u.fullName).trim().toLowerCase()); }
-      });
-      const valid = savedList.filter(
-        (u) => u && typeof u === 'object' && u.id && u.username &&
-          !delUserSet.has(u.id) &&
-          !delUserSet.has(String(u.id).toLowerCase()) &&
-          !delUserSet.has(String(u.username).trim()) &&
-          !delUserSet.has(String(u.username).trim().toLowerCase()) &&
-          !isUserDeleted(u, delUserSet)
-      );
+      cleanupDeletedUserTombstonesAgainstActiveUsers(savedList);
+      const valid = deduplicateUsers(savedList, getDeletedUserIds());
       if (valid.length > 0) {
         return valid;
       }
     }
-    const fallback = INITIAL_USERS.filter(
-      (u) => !delUserSet.has(u.id) &&
-        !delUserSet.has(String(u.id).toLowerCase()) &&
-        !delUserSet.has(String(u.username).trim()) &&
-        !delUserSet.has(String(u.username).trim().toLowerCase()) &&
-        !isUserDeleted(u, delUserSet)
-    );
-    return fallback.length > 0 ? fallback : [INITIAL_USERS[0]];
+    const fallbackList = Array.isArray(users) && users.length > 0 ? users : (Array.isArray(userAccounts) && userAccounts.length > 0 ? userAccounts : INITIAL_USERS);
+    cleanupDeletedUserTombstonesAgainstActiveUsers(fallbackList);
+    const fallback = deduplicateUsers(fallbackList, getDeletedUserIds());
+    return fallback.length > 0 ? fallback : INITIAL_USERS;
   };
 
   const [localAccountsList, setLocalAccountsList] = useState<UserAccount[]>(() => {
@@ -151,7 +141,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
         try {
           const current = getDeletedUserIds();
           const merged = Array.from(new Set([...current, ...data.deletedUserIds])).slice(-500);
-          localStorage.setItem('ga_warehouse_deleted_user_ids_v1', JSON.stringify(merged));
+          localStorage.setItem('ga_warehouse_deleted_user_ids_v8', JSON.stringify(merged));
         } catch {}
       }
       if (data && data.users && Array.isArray(data.users) && data.users.length > 0) {
@@ -188,26 +178,31 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const findMatchingUser = (accountList: UserAccount[], inputIdent: string): UserAccount | undefined => {
-    const cleanIdent = inputIdent.trim().toLowerCase();
+    const cleanIdent = inputIdent.trim().toLowerCase().replace(/^@/, '');
 
     // 1. Exact username match (Highest Priority)
-    let matched = accountList.find((u) => u.username.toLowerCase() === cleanIdent);
+    let matched = accountList.find((u) => {
+      const uName = u.username.toLowerCase().trim().replace(/^@/, '');
+      return uName === cleanIdent;
+    });
 
     // 2. Exact email match
     if (!matched) {
       matched = accountList.find((u) => {
-        const userEmail1 = `${u.username.toLowerCase()}@muliabara.com`;
-        const userEmail2 = `${u.username.toLowerCase()}@gmail.com`;
+        const uName = u.username.toLowerCase().trim().replace(/^@/, '');
+        const userEmail1 = `${uName}@muliabara.com`;
+        const userEmail2 = `${uName}@gmail.com`;
         return cleanIdent === userEmail1 || cleanIdent === userEmail2;
       });
     }
 
-    // 3. Match full name or partial words in name (e.g. "Ida", "Rian", "Adit", "Aditya", "Natha", "Mirwan", "Ira", "Anya", "Randi")
+    // 3. Match full name or partial words in name
     if (!matched) {
       matched = accountList.find((u) => {
-        const full = u.fullName.toLowerCase();
+        const full = u.fullName.toLowerCase().trim();
+        const uName = u.username.toLowerCase().trim().replace(/^@/, '');
         const words = full.split(/[\s,.-]+/);
-        return full === cleanIdent || words.includes(cleanIdent) || full.includes(cleanIdent) || cleanIdent.includes(u.username.toLowerCase());
+        return full === cleanIdent || words.includes(cleanIdent) || full.includes(cleanIdent) || cleanIdent.includes(uName);
       });
     }
 
