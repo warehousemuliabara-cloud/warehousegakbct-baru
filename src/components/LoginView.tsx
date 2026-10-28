@@ -13,6 +13,7 @@ import { INITIAL_USERS } from '../data/initialData';
 import { CompanyLogo } from './CompanyLogo';
 import { 
   fetchFreshWarehouseData, 
+  getAuthoritativeCloudData,
   subscribeToWarehouseData, 
   getDeletedUserIds, 
   isUserDeleted,
@@ -103,10 +104,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   const [localAccountsList, setLocalAccountsList] = useState<UserAccount[]>(() => {
     try {
-      const savedUsers = localStorage.getItem('ga_warehouse_users_v8') || localStorage.getItem('ga_warehouse_users_v7') || localStorage.getItem('ga_warehouse_users_v6');
+      const savedUsers = localStorage.getItem('ga_warehouse_users_v8');
       if (savedUsers) {
         const parsed = JSON.parse(savedUsers);
-        return sanitizeUsersList(parsed);
+        const cleaned = sanitizeUsersList(parsed);
+        if (cleaned.length > 0) return cleaned;
       }
     } catch {
       // ignore
@@ -125,8 +127,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   // Real-time listener and instant fetch for user accounts and dashboard config from Firestore in LoginView
   useEffect(() => {
-    // Immediately fetch fresh accounts from Cloud on load
-    fetchFreshWarehouseData().then((freshData) => {
+    // Immediately fetch fresh authoritative accounts from Cloud on load
+    getAuthoritativeCloudData().then((freshData) => {
       if (freshData && Array.isArray(freshData.users) && freshData.users.length > 0) {
         const freshSanitized = sanitizeUsersList(freshData.users);
         setLocalAccountsList(freshSanitized);
@@ -237,10 +239,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
     let currentAccounts = localAccountsList.length > 0 ? localAccountsList : sanitizeUsersList(INITIAL_USERS);
     let matchedUser = findMatchingUser(currentAccounts, cleanIdent);
 
-    // If not found in current local list, perform direct fresh pull from Firestore server!
+    // If not found in current local list, perform direct authoritative fetch from Firestore/Relay!
     if (!matchedUser) {
       try {
-        const cloudData = await fetchFreshWarehouseData();
+        const cloudData = await getAuthoritativeCloudData();
         if (cloudData && cloudData.users && Array.isArray(cloudData.users) && cloudData.users.length > 0) {
           const freshSanitized = sanitizeUsersList(cloudData.users);
           setLocalAccountsList(freshSanitized);
@@ -358,6 +360,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <input
                 type="text"
                 required
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={identifier}
                 onChange={(e) => {
                   setIdentifier(e.target.value);
@@ -381,6 +386,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <input
                 type={showPassword ? 'text' : 'password'}
                 required
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value);

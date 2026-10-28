@@ -247,10 +247,11 @@ export default function App() {
   // 4. User accounts & RBAC
   const [users, setUsers] = useState<UserAccount[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY_USERS) || localStorage.getItem('ga_warehouse_users_v6') || localStorage.getItem('ga_warehouse_users_v7');
+      const saved = localStorage.getItem(STORAGE_KEY_USERS);
       if (saved) {
         const parsed = JSON.parse(saved);
-        return sanitizeUsersList(parsed);
+        const cleaned = sanitizeUsersList(parsed);
+        if (cleaned.length > 0) return cleaned;
       }
       return INITIAL_USERS;
     } catch {
