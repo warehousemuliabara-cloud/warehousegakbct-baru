@@ -720,6 +720,66 @@ export function cleanupDeletedUserTombstonesAgainstActiveUsers(activeUsers: any[
   }
 }
 
+const STORAGE_KEY_USERS_LEDGER = 'ga_warehouse_users_ledger_v1';
+
+export function getUsersLedger(): any[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_USERS_LEDGER);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveToUsersLedger(user: any) {
+  if (typeof window === 'undefined' || !user || typeof user !== 'object') return;
+  try {
+    const current = getUsersLedger();
+    const cleanUsername = user.username ? String(user.username).toLowerCase().trim().replace(/^@/, '') : '';
+    const userId = user.id ? String(user.id).toLowerCase().trim() : '';
+    if (!cleanUsername && !userId) return;
+
+    clearDeletedUserTombstone(userId, cleanUsername, user.fullName);
+
+    const filtered = current.filter((u: any) => {
+      const uId = u.id ? String(u.id).toLowerCase().trim() : '';
+      const uName = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
+      if (userId && uId === userId) return false;
+      if (cleanUsername && uName === cleanUsername) return false;
+      return true;
+    });
+
+    filtered.unshift({ ...user, username: cleanUsername || user.username });
+    localStorage.setItem(STORAGE_KEY_USERS_LEDGER, JSON.stringify(filtered.slice(0, 300)));
+  } catch (e) {
+    console.warn('Failed to save user to ledger:', e);
+  }
+}
+
+export function removeFromUsersLedger(userId?: string, username?: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    const current = getUsersLedger();
+    const cleanUsername = username ? String(username).toLowerCase().trim().replace(/^@/, '') : '';
+    const cleanId = userId ? String(userId).toLowerCase().trim() : '';
+
+    const filtered = current.filter((u: any) => {
+      const uId = u.id ? String(u.id).toLowerCase().trim() : '';
+      const uName = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
+      if (cleanId && uId === cleanId) return false;
+      if (cleanUsername && uName === cleanUsername) return false;
+      return true;
+    });
+
+    localStorage.setItem(STORAGE_KEY_USERS_LEDGER, JSON.stringify(filtered));
+  } catch (e) {
+    console.warn('Failed to remove user from ledger:', e);
+  }
+}
+
 export function cleanupDeletedEmployeeTombstonesAgainstActiveEmployees(activeEmployees: any[]) {
   if (typeof window === 'undefined' || !Array.isArray(activeEmployees)) return;
   try {
@@ -1321,9 +1381,10 @@ export function smartMergeWarehouseData(
     ...payloadLocalDeletedUsers,
   ])).slice(-500);
 
-  // Combine local, remote, AND baseline initial accounts to guarantee core accounts like 'natha' or 'master.admin' are never lost
+  // Combine local, remote, baseline initial accounts, AND permanent users ledger
   const candidateUsers = [
     ...INITIAL_USERS,
+    ...getUsersLedger(),
     ...(localObj.users || []),
     ...(remoteObj.users || [])
   ];
@@ -1353,6 +1414,9 @@ export function smartMergeWarehouseData(
   }
 
   const mergedUsers = deduplicateUsers(candidateUsers, allDeletedUserIds);
+  if (Array.isArray(mergedUsers)) {
+    mergedUsers.forEach((u) => saveToUsersLedger(u));
+  }
 
   // 5. Audit logs
   const logMap = new Map<string, any>();
@@ -1658,8 +1722,8 @@ export async function pushWarehouseSync(
   });
 
   const rawUsersToPush = Array.isArray(payload.users) && payload.users.length > 0
-    ? [...INITIAL_USERS, ...payload.users]
-    : INITIAL_USERS;
+    ? [...INITIAL_USERS, ...getUsersLedger(), ...payload.users]
+    : [...INITIAL_USERS, ...getUsersLedger()];
 
   cleanupDeletedUserTombstonesAgainstActiveUsers(rawUsersToPush);
   if (Array.isArray(payload.employees) && payload.employees.length > 0) {
@@ -1721,6 +1785,11 @@ export async function pushWarehouseSync(
     deletedUserIds
   );
 
+  // Save all active users to permanent Users Ledger in LocalStorage
+  if (Array.isArray(filteredUsers)) {
+    filteredUsers.forEach((u) => saveToUsersLedger(u));
+  }
+
   const deletedItemIds = Array.from(new Set([
     ...getDeletedItemIds(),
     ...(payload.deletedItemIds || []),
@@ -1756,6 +1825,9 @@ export async function pushWarehouseSync(
   const cleanPayload = sanitizePayloadForFirestore(finalPayload);
   lastAppliedHash = computeDataHash(cleanPayload);
 
+  // 0. Synchronously save to local offline queue FIRST so tab/window close never drops the change
+  saveToOfflineQueue(cleanPayload);
+
   // 1. Broadcast to other tabs in the same browser immediately (0ms)
   if (broadcastChannel) {
     try {
@@ -1775,12 +1847,14 @@ export async function pushWarehouseSync(
   // 3. Persist directly to Firestore Cloud for long-term database storage
   try {
     await setDoc(docRef, cleanPayload);
+    // Remove from offline queue since setDoc succeeded
+    try {
+      localStorage.removeItem(STORAGE_KEY_OFFLINE_QUEUE);
+    } catch {}
     updateSyncState('connected', 'Tersinkronisasi Realtime (PC ↔ HP Terhubung)');
     return cleanPayload;
   } catch (error: any) {
-    // Queue payload so it is automatically retried for Firestore Cloud when quota resets
-    saveToOfflineQueue(cleanPayload);
-    // Even if Firestore hits daily limit, Cross-Device Relay already updated PC & Handphone!
+    // Keep in offline queue so it is automatically retried for Firestore Cloud when quota resets
     updateSyncState('connected', 'Tersinkronisasi Realtime (PC ↔ HP Terhubung)');
     return cleanPayload;
   }

@@ -18,6 +18,7 @@ import {
   getDeletedUserIds, 
   isUserDeleted,
   deduplicateUsers,
+  getUsersLedger,
   cleanupDeletedUserTombstonesAgainstActiveUsers
 } from '../utils/firebaseSync';
 
@@ -87,10 +88,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
     if (companySubtitle) setCurrentSubtitle(companySubtitle);
   }, [companySubtitle]);
 
-  // Validate and clean user list while respecting user deletions
+  // Validate and clean user list while respecting user deletions and permanent users ledger
   const sanitizeUsersList = (savedList: any): UserAccount[] => {
     const baseList = Array.isArray(savedList) && savedList.length > 0 ? savedList : [];
-    const candidateList = [...INITIAL_USERS, ...baseList];
+    const candidateList = [...INITIAL_USERS, ...getUsersLedger(), ...baseList];
     cleanupDeletedUserTombstonesAgainstActiveUsers(candidateList);
     const valid = deduplicateUsers(candidateList, getDeletedUserIds());
     return valid.length > 0 ? valid : INITIAL_USERS;

@@ -98,6 +98,9 @@ import {
   clearDeletedLoanIds,
   getDeletedUserIds,
   clearDeletedUserTombstone,
+  getUsersLedger,
+  saveToUsersLedger,
+  removeFromUsersLedger,
   getDeletedItemIds,
   isUserDeleted,
   deduplicateItemsList,
@@ -132,15 +135,12 @@ const STORAGE_KEY_CONFIG = 'ga_warehouse_config_v8';
 const STORAGE_KEY_CATEGORIES = 'ga_warehouse_categories_v1';
 
 export default function App() {
-  // Helper to validate and ensure users list is safe, clean, and retains user deletions
+  // Helper to validate and ensure users list is safe, clean, and includes getUsersLedger()
   const sanitizeUsersList = (savedList: any): UserAccount[] => {
-    if (Array.isArray(savedList) && savedList.length > 0) {
-      const valid = deduplicateUsers(savedList, getDeletedUserIds());
-      if (valid.length > 0) {
-        return valid;
-      }
-    }
-    return INITIAL_USERS;
+    const baseList = Array.isArray(savedList) ? savedList : [];
+    const candidateList = [...INITIAL_USERS, ...getUsersLedger(), ...baseList];
+    const valid = deduplicateUsers(candidateList, getDeletedUserIds());
+    return valid.length > 0 ? valid : INITIAL_USERS;
   };
 
   // Helper to normalize and ensure items list is clean, deduplicated, and rack location is valid
@@ -864,6 +864,9 @@ export default function App() {
     const cleanUsername = newUser.username.toLowerCase().trim().replace(/^@/, '');
     const userToSave = { ...newUser, username: cleanUsername };
 
+    // Save to permanent Users Ledger in LocalStorage so account is NEVER lost
+    saveToUsersLedger(userToSave);
+
     // Deduplicate against existing users by username or id
     const filteredExisting = users.filter((u) => {
       const existingU = u.username.toLowerCase().trim().replace(/^@/, '');
@@ -871,7 +874,7 @@ export default function App() {
     });
 
     const nextDeletedUserIds = getDeletedUserIds();
-    const nextUsers = deduplicateUsers([userToSave, ...filteredExisting], nextDeletedUserIds);
+    const nextUsers = deduplicateUsers([userToSave, ...getUsersLedger(), ...filteredExisting], nextDeletedUserIds);
 
     setUsers(nextUsers);
     latestStateRef.current.users = nextUsers;
@@ -891,9 +894,12 @@ export default function App() {
     const cleanUsername = updatedUser.username.toLowerCase().trim().replace(/^@/, '');
     const userToSave = { ...updatedUser, username: cleanUsername };
 
+    // Save to permanent Users Ledger in LocalStorage
+    saveToUsersLedger(userToSave);
+
     const nextDeletedUserIds = getDeletedUserIds();
     const rawUpdated = users.map((u) => (u.id === userToSave.id || u.username.toLowerCase().trim().replace(/^@/, '') === cleanUsername ? userToSave : u));
-    const nextUsers = deduplicateUsers(rawUpdated, nextDeletedUserIds);
+    const nextUsers = deduplicateUsers([...getUsersLedger(), ...rawUpdated], nextDeletedUserIds);
 
     setUsers(nextUsers);
     latestStateRef.current.users = nextUsers;
@@ -932,6 +938,7 @@ export default function App() {
     }
 
     recordDeletedUserId(userToDel.id, userToDel.username, userToDel.fullName);
+    removeFromUsersLedger(userToDel.id, userToDel.username);
     const nextDeletedUserIds = getDeletedUserIds();
 
     const filtered = users.filter((u) => u.id !== userId && !isUserDeleted(u, nextDeletedUserIds));
