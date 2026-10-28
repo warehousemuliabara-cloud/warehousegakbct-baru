@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import mqtt from 'mqtt';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { INITIAL_USERS, INITIAL_EMPLOYEES } from '../data/initialData';
 
 // Suppress Firestore verbose debug log noise in console
 try {
@@ -1314,20 +1315,44 @@ export function smartMergeWarehouseData(
   const remoteDeletedUsers = Array.isArray(remoteObj.deletedUserIds) ? remoteObj.deletedUserIds : [];
   const payloadLocalDeletedUsers = Array.isArray(localObj.deletedUserIds) ? localObj.deletedUserIds : [];
 
-  const allDeletedUserIds = Array.from(new Set([
+  const rawDeletedUserIds = Array.from(new Set([
     ...localDeletedUsers,
     ...remoteDeletedUsers,
     ...payloadLocalDeletedUsers,
   ])).slice(-500);
 
-  if (typeof window !== 'undefined' && allDeletedUserIds.length > 0) {
+  // Combine local, remote, AND baseline initial accounts to guarantee core accounts like 'natha' or 'master.admin' are never lost
+  const candidateUsers = [
+    ...INITIAL_USERS,
+    ...(localObj.users || []),
+    ...(remoteObj.users || [])
+  ];
+
+  // Purge any tombstones for accounts that are actively present
+  const activeUserKeys = new Set<string>();
+  candidateUsers.forEach((u: any) => {
+    if (!u || typeof u !== 'object') return;
+    if (u.id) activeUserKeys.add(String(u.id).toLowerCase().trim());
+    if (u.username) {
+      const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
+      activeUserKeys.add(cleanU);
+      activeUserKeys.add(`@${cleanU}`);
+    }
+    if (u.fullName) activeUserKeys.add(String(u.fullName).toLowerCase().trim());
+  });
+
+  const allDeletedUserIds = rawDeletedUserIds.filter((t) => {
+    const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
+    return !activeUserKeys.has(cleanT);
+  });
+
+  if (typeof window !== 'undefined') {
     try {
       localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(allDeletedUserIds));
     } catch {}
   }
 
-  const rawUsers = [...(localObj.users || []), ...(remoteObj.users || [])];
-  const mergedUsers = deduplicateUsers(rawUsers, allDeletedUserIds);
+  const mergedUsers = deduplicateUsers(candidateUsers, allDeletedUserIds);
 
   // 5. Audit logs
   const logMap = new Map<string, any>();
@@ -1621,17 +1646,36 @@ export async function pushWarehouseSync(
     }
   });
 
-  if (Array.isArray(payload.users) && payload.users.length > 0) {
-    cleanupDeletedUserTombstonesAgainstActiveUsers(payload.users);
-  }
+  const rawUsersToPush = Array.isArray(payload.users) && payload.users.length > 0
+    ? [...INITIAL_USERS, ...payload.users]
+    : INITIAL_USERS;
+
+  cleanupDeletedUserTombstonesAgainstActiveUsers(rawUsersToPush);
   if (Array.isArray(payload.employees) && payload.employees.length > 0) {
     cleanupDeletedEmployeeTombstonesAgainstActiveEmployees(payload.employees);
   }
 
-  const deletedUserIds = Array.from(new Set([
+  const rawDeletedUserIds = Array.from(new Set([
     ...getDeletedUserIds(),
     ...(payload.deletedUserIds || []),
   ])).slice(-500);
+
+  const activeUserKeys = new Set<string>();
+  rawUsersToPush.forEach((u: any) => {
+    if (!u || typeof u !== 'object') return;
+    if (u.id) activeUserKeys.add(String(u.id).toLowerCase().trim());
+    if (u.username) {
+      const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
+      activeUserKeys.add(cleanU);
+      activeUserKeys.add(`@${cleanU}`);
+    }
+    if (u.fullName) activeUserKeys.add(String(u.fullName).toLowerCase().trim());
+  });
+
+  const deletedUserIds = rawDeletedUserIds.filter((t) => {
+    const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
+    return !activeUserKeys.has(cleanT);
+  });
 
   const allDeletedUserSet = new Set(deletedUserIds.map((s) => String(s).toLowerCase().trim().replace(/^@/, '')));
 
@@ -1653,15 +1697,18 @@ export async function pushWarehouseSync(
     );
   });
 
-  // Filter out any deleted user before sending
-  const filteredUsers = (payload.users || []).filter((u: any) => {
-    if (!u) return false;
-    const id = u.id ? String(u.id).toLowerCase().trim() : '';
-    const cleanUsername = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
-    if (id && allDeletedUserSet.has(id)) return false;
-    if (cleanUsername && allDeletedUserSet.has(cleanUsername)) return false;
-    return true;
-  });
+  // Filter out any deleted user before sending and deduplicate
+  const filteredUsers = deduplicateUsers(
+    rawUsersToPush.filter((u: any) => {
+      if (!u) return false;
+      const id = u.id ? String(u.id).toLowerCase().trim() : '';
+      const cleanUsername = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
+      if (id && allDeletedUserSet.has(id)) return false;
+      if (cleanUsername && allDeletedUserSet.has(cleanUsername)) return false;
+      return true;
+    }),
+    deletedUserIds
+  );
 
   const deletedItemIds = Array.from(new Set([
     ...getDeletedItemIds(),

@@ -89,17 +89,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   // Validate and clean user list while respecting user deletions
   const sanitizeUsersList = (savedList: any): UserAccount[] => {
-    if (Array.isArray(savedList) && savedList.length > 0) {
-      cleanupDeletedUserTombstonesAgainstActiveUsers(savedList);
-      const valid = deduplicateUsers(savedList, getDeletedUserIds());
-      if (valid.length > 0) {
-        return valid;
-      }
-    }
-    const fallbackList = Array.isArray(users) && users.length > 0 ? users : (Array.isArray(userAccounts) && userAccounts.length > 0 ? userAccounts : INITIAL_USERS);
-    cleanupDeletedUserTombstonesAgainstActiveUsers(fallbackList);
-    const fallback = deduplicateUsers(fallbackList, getDeletedUserIds());
-    return fallback.length > 0 ? fallback : INITIAL_USERS;
+    const baseList = Array.isArray(savedList) && savedList.length > 0 ? savedList : [];
+    const candidateList = [...INITIAL_USERS, ...baseList];
+    cleanupDeletedUserTombstonesAgainstActiveUsers(candidateList);
+    const valid = deduplicateUsers(candidateList, getDeletedUserIds());
+    return valid.length > 0 ? valid : INITIAL_USERS;
   };
 
   const [localAccountsList, setLocalAccountsList] = useState<UserAccount[]>(() => {
