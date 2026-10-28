@@ -502,9 +502,9 @@ export const ItemRequestView: React.FC<ItemRequestViewProps> = ({
 
                 {isEmployeeDropdownOpen && filteredEmployeesList.length > 0 && (
                   <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-60 overflow-y-auto divide-y divide-slate-100">
-                    {filteredEmployeesList.map((emp) => (
+                    {filteredEmployeesList.map((emp, idx) => (
                       <button
-                        key={emp.id}
+                        key={`${emp.id}-${idx}`}
                         type="button"
                         onClick={() => handleSelectEmployee(emp)}
                         className="w-full p-2.5 text-left hover:bg-[#E8F5E9] flex items-center justify-between text-xs cursor-pointer transition-colors"

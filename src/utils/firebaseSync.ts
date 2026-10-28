@@ -556,29 +556,65 @@ export function isEmployeeDeleted(emp: any, deletedIds?: any): boolean {
 
 export function deduplicateEmployees(list: any[], deletedEmployeeIds?: string[]): any[] {
   if (!Array.isArray(list)) return [];
-  const map = new Map<string, any>();
   const listDeleted = Array.isArray(deletedEmployeeIds) ? deletedEmployeeIds : getDeletedEmployeeIds();
-  const deletedSet = new Set(listDeleted.map(s => String(s).toLowerCase().trim().replace(/\s+/g, ' ')));
 
+  // First pass: Deduplicate by ID
+  const idMap = new Map<string, any>();
   list.forEach((emp, index) => {
     if (!emp || typeof emp !== 'object') return;
     if (isEmployeeDeleted(emp, listDeleted)) return;
-    const name = emp.name ? String(emp.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
-    const id = emp.id ? String(emp.id).toLowerCase().trim() : '';
-    const key = name || id || `emp_idx_${index}`;
 
-    const existing = map.get(key);
+    const id = emp.id ? String(emp.id).toLowerCase().trim() : '';
+    const name = emp.name ? String(emp.name).toLowerCase().trim().replace(/\s+/g, ' ') : '';
+    const key = id ? `id_${id}` : (name ? `name_${name}` : `emp_idx_${index}`);
+
+    const existing = idMap.get(key);
     if (!existing) {
-      map.set(key, emp);
+      idMap.set(key, emp);
     } else {
       const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
       const newTime = new Date(emp.updatedAt || emp.createdAt || 0).getTime();
       if (newTime >= existingTime) {
-        map.set(key, { ...existing, ...emp, id: existing.id || emp.id });
+        idMap.set(key, { ...existing, ...emp, id: existing.id || emp.id });
       }
     }
   });
-  return Array.from(map.values());
+
+  // Second pass: Deduplicate by employee Name to combine duplicates with different IDs
+  const nameMap = new Map<string, any>();
+  Array.from(idMap.values()).forEach((emp) => {
+    const nameKey = emp.name ? String(emp.name).toLowerCase().trim().replace(/\s+/g, ' ') : (emp.id || '');
+    if (!nameKey) return;
+
+    const existing = nameMap.get(nameKey);
+    if (!existing) {
+      nameMap.set(nameKey, emp);
+    } else {
+      const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      const newTime = new Date(emp.updatedAt || emp.createdAt || 0).getTime();
+      if (newTime >= existingTime) {
+        nameMap.set(nameKey, { ...existing, ...emp, id: existing.id || emp.id });
+      }
+    }
+  });
+
+  // Final pass: Guarantee 100% unique IDs across all employee records
+  const result: any[] = [];
+  const usedIds = new Set<string>();
+
+  Array.from(nameMap.values()).forEach((emp, idx) => {
+    let cleanId = emp.id || `emp-${idx + 1}`;
+    if (usedIds.has(cleanId)) {
+      cleanId = `${cleanId}_dup_${idx + 1}`;
+    }
+    usedIds.add(cleanId);
+    result.push({
+      ...emp,
+      id: cleanId,
+    });
+  });
+
+  return result;
 }
 
 export function getDeletedUserIds(): string[] {
@@ -631,15 +667,24 @@ export function recordDeletedUserIds(idsAndUsernames: string[]) {
   }
 }
 
-export function clearDeletedUserTombstone(userId: string, username?: string) {
+export function clearDeletedUserTombstone(userId?: string, username?: string, fullName?: string) {
   if (typeof window === 'undefined') return;
   try {
     const current = getDeletedUserIds();
     const set = new Set(Array.isArray(current) ? current : []);
-    if (userId) set.delete(userId);
+    if (userId) {
+      set.delete(userId);
+      set.delete(String(userId).toLowerCase().trim());
+    }
     if (username) {
+      const cleanU = String(username).toLowerCase().trim().replace(/^@/, '');
       set.delete(username);
-      set.delete(username.toLowerCase().trim());
+      set.delete(cleanU);
+      set.delete(`@${cleanU}`);
+    }
+    if (fullName) {
+      set.delete(fullName);
+      set.delete(String(fullName).toLowerCase().trim());
     }
     localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(Array.from(set)));
   } catch (e) {
@@ -651,10 +696,11 @@ export function isUserDeleted(u: any, deletedIds?: any): boolean {
   if (!u) return true;
   const list = Array.isArray(deletedIds) ? deletedIds : getDeletedUserIds();
   const deletedSet = new Set(
-    (Array.isArray(list) ? list : []).map((s: any) => String(s).toLowerCase().trim())
+    (Array.isArray(list) ? list : []).map((s: any) => String(s).toLowerCase().trim().replace(/^@/, ''))
   );
   const id = u.id ? String(u.id).toLowerCase().trim() : '';
-  const username = u.username ? String(u.username).toLowerCase().trim() : '';
+  const username = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
+
   if (id && deletedSet.has(id)) return true;
   if (username && deletedSet.has(username)) return true;
   return false;
@@ -664,41 +710,42 @@ export function deduplicateUsers(list: any[], deletedUserIds?: string[]): any[] 
   if (!Array.isArray(list)) return [];
   const userMap = new Map<string, any>();
   const listDeleted = Array.isArray(deletedUserIds) ? deletedUserIds : getDeletedUserIds();
-  const deletedUserSet = new Set(listDeleted.map(s => String(s).toLowerCase().trim()));
+  const deletedUserSet = new Set(
+    listDeleted.map((s: any) => String(s).toLowerCase().trim().replace(/^@/, ''))
+  );
 
   list.forEach((u: any) => {
     if (!u || typeof u !== 'object') return;
     const id = u.id ? String(u.id).toLowerCase().trim() : '';
-    const username = u.username ? String(u.username).toLowerCase().trim() : '';
-    const fullName = u.fullName ? String(u.fullName).toLowerCase().trim() : '';
+    const cleanUsername = u.username ? String(u.username).toLowerCase().trim().replace(/^@/, '') : '';
 
     if (id && deletedUserSet.has(id)) return;
-    if (username && deletedUserSet.has(username)) return;
-    if (fullName && deletedUserSet.has(fullName)) return;
+    if (cleanUsername && deletedUserSet.has(cleanUsername)) return;
 
-    const key = username || id;
+    // Unique key based on normalized username or id
+    const key = cleanUsername ? `usr_${cleanUsername}` : (id ? `id_${id}` : '');
     if (!key) return;
 
     const existing = userMap.get(key);
     if (!existing) {
-      userMap.set(key, u);
+      userMap.set(key, { ...u, username: cleanUsername || u.username });
     } else {
       const existingIsMaster = existing.role === 'MASTER_ADMIN';
       const currentIsMaster = u.role === 'MASTER_ADMIN';
       if (currentIsMaster && !existingIsMaster) {
-        userMap.set(key, u);
+        userMap.set(key, { ...u, username: cleanUsername || u.username });
       } else if (u.password && !existing.password) {
-        userMap.set(key, u);
+        userMap.set(key, { ...u, username: cleanUsername || u.username });
       } else {
         const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
         const newTime = new Date(u.updatedAt || u.createdAt || 0).getTime();
         if (newTime >= existingTime) {
-          userMap.set(key, { ...existing, ...u, id: existing.id || u.id });
+          userMap.set(key, { ...existing, ...u, username: cleanUsername || u.username, id: existing.id || u.id });
         }
       }
     }
   });
-  return Array.from(userMap.values()).filter((u: any) => !isUserDeleted(u, listDeleted));
+  return Array.from(userMap.values());
 }
 
 // Loan Tombstone Management: Track deleted loans so they NEVER reappear across devices or on other transactions
@@ -1560,6 +1607,16 @@ export async function pushWarehouseSync(
     return true;
   });
 
+  const deletedItemIds = Array.from(new Set([
+    ...getDeletedItemIds(),
+    ...(payload.deletedItemIds || []),
+  ])).slice(-500);
+
+  const deletedEmployeeIds = Array.from(new Set([
+    ...getDeletedEmployeeIds(),
+    ...(payload.deletedEmployeeIds || []),
+  ])).slice(-500);
+
   // Save each valid transaction to permanent local ledger
   filteredTransactions.forEach((trx) => saveToLocalLedger(trx));
 
@@ -1569,6 +1626,8 @@ export async function pushWarehouseSync(
     deletedTransactionIds: deletedIds,
     deletedLoanIds: deletedLoanIds,
     deletedUserIds: deletedUserIds,
+    deletedItemIds: deletedItemIds,
+    deletedEmployeeIds: deletedEmployeeIds,
     employees: payload.employees || [],
     users: filteredUsers,
     loans: filteredLoans,

@@ -833,7 +833,7 @@ export const EmployeeDatabaseModal: React.FC<EmployeeDatabaseModalProps> = ({
                     const isSelected = selectedEmpIds.includes(emp.id);
 
                     return (
-                      <tr key={emp.id} className={`hover:bg-slate-50/80 transition-colors ${isSelected ? 'bg-blue-50/40' : ''}`}>
+                      <tr key={`${emp.id}-${index}`} className={`hover:bg-slate-50/80 transition-colors ${isSelected ? 'bg-blue-50/40' : ''}`}>
                         <td className="py-2.5 px-3 text-center">
                           <input
                             type="checkbox"

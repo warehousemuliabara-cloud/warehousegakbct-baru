@@ -428,9 +428,9 @@ export const PublicRequestPortalView: React.FC<PublicRequestPortalViewProps> = (
                           Nama "{employeeSearchInput || requesterName}" tidak ditemukan di database. Anda tetap dapat melanjutkan mengetik nama manual.
                         </div>
                       ) : (
-                        filteredEmployees.map((emp) => (
+                        filteredEmployees.map((emp, idx) => (
                           <button
-                            key={emp.id}
+                            key={`${emp.id}-${idx}`}
                             type="button"
                             onClick={() => {
                               handleSelectEmployee(emp.name);

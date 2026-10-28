@@ -819,6 +819,35 @@ export default function App() {
     setAuditLogs((prev) => [newLog, ...(prev || []).slice(0, 499)]); // Keep last 500 logs
   };
 
+  // Synchronous flush on page reload or tab close
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      const current = latestStateRef.current;
+      if (current) {
+        try {
+          if (Array.isArray(current.items)) localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(current.items));
+          if (Array.isArray(current.transactions)) localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(current.transactions));
+          if (Array.isArray(current.employees)) localStorage.setItem(STORAGE_KEY_EMPLOYEES, JSON.stringify(current.employees));
+          if (Array.isArray(current.users)) localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(current.users));
+          if (current.currentUser) localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(current.currentUser));
+          if (Array.isArray(current.loans)) localStorage.setItem(STORAGE_KEY_LOANS, JSON.stringify(current.loans));
+          if (Array.isArray(current.auditLogs)) localStorage.setItem(STORAGE_KEY_AUDIT, JSON.stringify(current.auditLogs));
+          if (current.dashboardConfig) localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(current.dashboardConfig));
+        } catch {
+          // safe
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+    };
+  }, []);
+
   // Role & User operations
   const handleSwitchUser = (user: UserAccount) => {
     setCurrentUser(user);
@@ -828,39 +857,65 @@ export default function App() {
   };
 
   const handleAddUser = (newUser: UserAccount) => {
-    // Clear any previous tombstone for this user
-    clearDeletedUserTombstone(newUser.id, newUser.username);
-    const nextUsers = [newUser, ...users.filter(u => u.id !== newUser.id)];
+    // Clear any previous tombstone for this user ID, username, and full name
+    clearDeletedUserTombstone(newUser.id, newUser.username, newUser.fullName);
+
+    const cleanUsername = newUser.username.toLowerCase().trim().replace(/^@/, '');
+    const userToSave = { ...newUser, username: cleanUsername };
+
+    // Deduplicate against existing users by username or id
+    const filteredExisting = users.filter((u) => {
+      const existingU = u.username.toLowerCase().trim().replace(/^@/, '');
+      return u.id !== userToSave.id && existingU !== cleanUsername;
+    });
+
+    const nextDeletedUserIds = getDeletedUserIds();
+    const nextUsers = deduplicateUsers([userToSave, ...filteredExisting], nextDeletedUserIds);
+
     setUsers(nextUsers);
+    latestStateRef.current.users = nextUsers;
+
     try {
       localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(nextUsers));
     } catch (e) {
       console.error('Save users error', e);
     }
-    syncToCloud({ users: nextUsers, deletedUserIds: getDeletedUserIds() });
-    logAudit('Tambah Akun Pengguna', 'USERS', `Membuat akun ${newUser.fullName} (${newUser.role})`);
-    showToast(`Pengguna baru "${newUser.fullName}" berhasil didaftarkan & disinkronkan ke Cloud!`, 'success');
+
+    syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
+    logAudit('Tambah Akun Pengguna', 'USERS', `Membuat akun ${userToSave.fullName} (@${cleanUsername})`);
+    showToast(`Pengguna baru "${userToSave.fullName}" (@${cleanUsername}) berhasil didaftarkan & disinkronkan ke Cloud!`, 'success');
   };
 
   const handleUpdateUser = (updatedUser: UserAccount) => {
-    const nextUsers = users.map((u) => (u.id === updatedUser.id ? updatedUser : u));
+    const cleanUsername = updatedUser.username.toLowerCase().trim().replace(/^@/, '');
+    const userToSave = { ...updatedUser, username: cleanUsername };
+
+    const nextDeletedUserIds = getDeletedUserIds();
+    const rawUpdated = users.map((u) => (u.id === userToSave.id || u.username.toLowerCase().trim().replace(/^@/, '') === cleanUsername ? userToSave : u));
+    const nextUsers = deduplicateUsers(rawUpdated, nextDeletedUserIds);
+
     setUsers(nextUsers);
+    latestStateRef.current.users = nextUsers;
+
     try {
       localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(nextUsers));
     } catch (e) {
       console.error('Save users error', e);
     }
-    if (currentUser.id === updatedUser.id) {
-      setCurrentUser(updatedUser);
+
+    if (currentUser.id === userToSave.id || currentUser.username.toLowerCase().trim().replace(/^@/, '') === cleanUsername) {
+      setCurrentUser(userToSave);
+      latestStateRef.current.currentUser = userToSave;
       try {
-        localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(updatedUser));
+        localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(userToSave));
       } catch (e) {
         console.error('Save current user error', e);
       }
     }
-    syncToCloud({ users: nextUsers });
-    logAudit('Update Akun Pengguna', 'USERS', `Memperbarui profil ${updatedUser.fullName}`);
-    showToast(`Data akun "${updatedUser.fullName}" berhasil diperbarui & disinkronkan!`, 'info');
+
+    syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
+    logAudit('Update Akun Pengguna', 'USERS', `Memperbarui profil ${userToSave.fullName}`);
+    showToast(`Data akun "${userToSave.fullName}" (@${cleanUsername}) berhasil diperbarui & disinkronkan!`, 'info');
   };
 
   const handleDeleteUser = (userId: string) => {
@@ -878,17 +933,20 @@ export default function App() {
     recordDeletedUserId(userToDel.id, userToDel.username, userToDel.fullName);
     const nextDeletedUserIds = getDeletedUserIds();
 
-    const nextUsers = users.filter((u) => u.id !== userId && !isUserDeleted(u, nextDeletedUserIds));
-    // Ensure safety: do not leave zero users
-    const safeUsers = nextUsers.length > 0 ? nextUsers : [INITIAL_USERS[0]];
-    
-    setUsers(safeUsers);
+    const filtered = users.filter((u) => u.id !== userId && !isUserDeleted(u, nextDeletedUserIds));
+    const safeUsers = filtered.length > 0 ? filtered : [INITIAL_USERS[0]];
+    const dedupedUsers = deduplicateUsers(safeUsers, nextDeletedUserIds);
+
+    setUsers(dedupedUsers);
+    latestStateRef.current.users = dedupedUsers;
+
     try {
-      localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(safeUsers));
+      localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(dedupedUsers));
     } catch (e) {
       console.error('Save users error', e);
     }
-    syncToCloud({ users: safeUsers, deletedUserIds: nextDeletedUserIds });
+
+    syncToCloud({ users: dedupedUsers, deletedUserIds: nextDeletedUserIds });
     logAudit('Hapus Akun Pengguna', 'USERS', `Menghapus akun ${userToDel.fullName} (@${userToDel.username})`);
     showToast(`Akun "${userToDel.fullName}" (@${userToDel.username}) berhasil dihapus secara permanen.`, 'success');
   };
