@@ -1419,8 +1419,16 @@ export async function fetchFreshWarehouseData(
         cloudData.transactions = filterTransactionsWithin3Months(cloudData.transactions);
       }
 
-      // Zero-Loss Merging with Tombstone Filtering: respects deletions and avoids resurrection
-      const merged = currentLocal ? smartMergeWarehouseData(currentLocal, cloudData) : cloudData;
+      // Zero-Loss Merging with Tombstone Filtering: ALWAYS merges INITIAL_USERS baseline and purges active user tombstones
+      const merged = smartMergeWarehouseData(currentLocal || {}, cloudData);
+
+      // Auto-heal Firestore Cloud if document was missing active accounts or contained stale tombstones
+      const cloudUsersCount = (cloudData.users || []).length;
+      if (merged.users.length > cloudUsersCount || (cloudData.deletedUserIds || []).length !== merged.deletedUserIds.length) {
+        const cleanPayload = sanitizePayloadForFirestore(merged);
+        setDoc(docRef, cleanPayload).catch(() => {});
+        publishCrossDeviceUpdate(cleanPayload);
+      }
 
       // If there are unsynced offline items waiting in queue, flush them
       if (getOfflineQueueCount() > 0) {
@@ -1429,25 +1437,25 @@ export async function fetchFreshWarehouseData(
 
       lastAppliedHash = computeDataHash(merged);
       return merged;
-    } else if (currentLocal) {
-      // First time initialization on Cloud
-      const initialTransactions = filterTransactionsWithin3Months(currentLocal.transactions || []);
+    } else {
+      // Initialize Firestore Cloud with complete baseline data
+      const initialTransactions = filterTransactionsWithin3Months(currentLocal?.transactions || []);
       const initialCloud: WarehouseSyncPayload = {
-        items: currentLocal.items || [],
+        items: currentLocal?.items || [],
         transactions: initialTransactions,
         deletedTransactionIds: getDeletedTransactionIds(),
         deletedLoanIds: getDeletedLoanIds(),
-        deletedUserIds: getDeletedUserIds(),
+        deletedUserIds: [],
         deletedItemIds: getDeletedItemIds(),
         deletedEmployeeIds: getDeletedEmployeeIds(),
-        employees: currentLocal.employees || [],
-        users: currentLocal.users || [],
-        loans: currentLocal.loans || [],
-        auditLogs: (currentLocal.auditLogs || []).slice(0, 50),
-        rolePermissions: currentLocal.rolePermissions || {},
-        dashboardConfig: currentLocal.dashboardConfig || {},
+        employees: currentLocal?.employees || INITIAL_EMPLOYEES,
+        users: deduplicateUsers([...INITIAL_USERS, ...(currentLocal?.users || [])], []),
+        loans: currentLocal?.loans || [],
+        auditLogs: (currentLocal?.auditLogs || []).slice(0, 50),
+        rolePermissions: currentLocal?.rolePermissions || {},
+        dashboardConfig: currentLocal?.dashboardConfig || {},
         lastUpdated: new Date().toISOString(),
-        updatedBy: currentLocal.updatedBy || 'Sistem',
+        updatedBy: currentLocal?.updatedBy || 'Sistem',
         lastWriterId: CLIENT_SESSION_ID,
       };
       
@@ -1553,12 +1561,15 @@ export function subscribeToWarehouseData(
       (snapshot) => {
         if (snapshot.exists()) {
           updateSyncState('connected', 'Tersinkronisasi Cloud (PC ↔ HP Terhubung)');
-          const data = snapshot.data() as WarehouseSyncPayload;
+          const rawData = snapshot.data() as WarehouseSyncPayload;
 
           // Skip if this change originated from the current tab
-          if (data.lastWriterId === CLIENT_SESSION_ID) {
+          if (rawData.lastWriterId === CLIENT_SESSION_ID) {
             return;
           }
+
+          // Always merge INITIAL_USERS baseline to guarantee active users are preserved
+          const data = smartMergeWarehouseData({}, rawData);
 
           // Check if data actually changed to prevent pointless React re-renders
           const newHash = computeDataHash(data);
