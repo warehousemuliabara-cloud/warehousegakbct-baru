@@ -176,16 +176,17 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   const findMatchingUser = (accountList: UserAccount[], inputIdent: string): UserAccount | undefined => {
     const cleanIdent = inputIdent.trim().toLowerCase().replace(/^@/, '');
+    const combinedAccounts = deduplicateUsers([...accountList, ...getUsersLedger(), ...INITIAL_USERS], getDeletedUserIds());
 
     // 1. Exact username match (Highest Priority)
-    let matched = accountList.find((u) => {
+    let matched = combinedAccounts.find((u) => {
       const uName = u.username.toLowerCase().trim().replace(/^@/, '');
       return uName === cleanIdent;
     });
 
     // 2. Exact email match
     if (!matched) {
-      matched = accountList.find((u) => {
+      matched = combinedAccounts.find((u) => {
         const uName = u.username.toLowerCase().trim().replace(/^@/, '');
         const userEmail1 = `${uName}@muliabara.com`;
         const userEmail2 = `${uName}@gmail.com`;
@@ -195,7 +196,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     // 3. Match full name or partial words in name
     if (!matched) {
-      matched = accountList.find((u) => {
+      matched = combinedAccounts.find((u) => {
         const full = u.fullName.toLowerCase().trim();
         const uName = u.username.toLowerCase().trim().replace(/^@/, '');
         const words = full.split(/[\s,.-]+/);
@@ -205,8 +206,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     // 4. Role aliases fallback for Master Admin / Admin GA / Warehouse
     if (!matched) {
-      if (cleanIdent === 'admin' || cleanIdent === 'master' || cleanIdent.includes('warehouse') || cleanIdent.includes('muliabara') || cleanIdent === 'kbct') {
-        matched = accountList.find((u) => u.role === 'MASTER_ADMIN') || accountList[0];
+      if (cleanIdent === 'admin' || cleanIdent === 'master' || cleanIdent.includes('warehouse') || cleanIdent.includes('muliabara' ) || cleanIdent === 'kbct') {
+        matched = combinedAccounts.find((u) => u.role === 'MASTER_ADMIN') || combinedAccounts[0];
       }
     }
 
