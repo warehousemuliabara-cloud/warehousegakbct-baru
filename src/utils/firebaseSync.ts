@@ -693,8 +693,33 @@ export function clearDeletedUserTombstone(userId?: string, username?: string, fu
   }
 }
 
-export function cleanupDeletedUserTombstonesAgainstActiveUsers(_activeUsers: any[]) {
-  // No-op: keep deleted user tombstones permanent so deleted accounts never reappear
+export function cleanupDeletedUserTombstonesAgainstActiveUsers(activeUsers: any[]) {
+  if (typeof window === 'undefined' || !Array.isArray(activeUsers)) return;
+  try {
+    const activeKeys = new Set<string>();
+    activeUsers.forEach((u) => {
+      if (!u || typeof u !== 'object') return;
+      if (u.id) activeKeys.add(String(u.id).toLowerCase().trim());
+      if (u.username) {
+        const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
+        activeKeys.add(cleanU);
+        activeKeys.add(`@${cleanU}`);
+      }
+      if (u.fullName) {
+        activeKeys.add(String(u.fullName).toLowerCase().trim());
+      }
+    });
+
+    const current = getDeletedUserIds();
+    const filtered = current.filter((t) => {
+      const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
+      return !activeKeys.has(cleanT) && !activeKeys.has(String(t).toLowerCase().trim());
+    });
+
+    localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(filtered));
+  } catch (e) {
+    // safe
+  }
 }
 
 const STORAGE_KEY_USERS_LEDGER = 'ga_warehouse_users_ledger_v1';
@@ -1367,7 +1392,21 @@ export function smartMergeWarehouseData(
   ];
 
   // Purge any tombstones for accounts that are actively present
-  const allDeletedUserIds = rawDeletedUserIds;
+  const activeCandidateKeys = new Set<string>();
+  [...(localObj.users || []), ...(remoteObj.users || []), ...getUsersLedger()].forEach((u: any) => {
+    if (!u) return;
+    if (u.id) activeCandidateKeys.add(String(u.id).toLowerCase().trim());
+    if (u.username) {
+      const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
+      activeCandidateKeys.add(cleanU);
+      activeCandidateKeys.add(`@${cleanU}`);
+    }
+  });
+
+  const allDeletedUserIds = rawDeletedUserIds.filter((t) => {
+    const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
+    return !activeCandidateKeys.has(cleanT) && !activeCandidateKeys.has(String(t).toLowerCase().trim());
+  });
 
   if (typeof window !== 'undefined') {
     try {
@@ -1594,8 +1633,9 @@ export function subscribeToWarehouseData(
             return;
           }
 
-          // Always merge INITIAL_USERS baseline to guarantee active users are preserved
-          const data = smartMergeWarehouseData({}, rawData);
+          // Always merge current local users/ledger to guarantee active users are preserved
+          const currentLocalLedger = getUsersLedger();
+          const data = smartMergeWarehouseData({ users: currentLocalLedger }, rawData);
 
           // Check if data actually changed to prevent pointless React re-renders
           const newHash = computeDataHash(data);
@@ -1692,12 +1732,32 @@ export async function pushWarehouseSync(
     cleanupDeletedEmployeeTombstonesAgainstActiveEmployees(payload.employees);
   }
 
+  const activeUserKeys = new Set<string>();
+  rawUsersToPush.forEach((u: any) => {
+    if (!u) return;
+    if (u.id) activeUserKeys.add(String(u.id).toLowerCase().trim());
+    if (u.username) {
+      const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
+      activeUserKeys.add(cleanU);
+      activeUserKeys.add(`@${cleanU}`);
+    }
+  });
+
   const rawDeletedUserIds = Array.from(new Set([
     ...getDeletedUserIds(),
     ...(payload.deletedUserIds || []),
   ])).slice(-500);
 
-  const deletedUserIds = rawDeletedUserIds;
+  const deletedUserIds = rawDeletedUserIds.filter((t) => {
+    const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
+    return !activeUserKeys.has(cleanT) && !activeUserKeys.has(String(t).toLowerCase().trim());
+  });
+
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(deletedUserIds));
+    } catch {}
+  }
 
   const allDeletedUserSet = new Set(deletedUserIds.map((s) => String(s).toLowerCase().trim().replace(/^@/, '')));
 

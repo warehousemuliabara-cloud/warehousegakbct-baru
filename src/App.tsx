@@ -98,6 +98,7 @@ import {
   clearDeletedLoanIds,
   getDeletedUserIds,
   clearDeletedUserTombstone,
+  cleanupDeletedUserTombstonesAgainstActiveUsers,
   getUsersLedger,
   saveToUsersLedger,
   removeFromUsersLedger,
@@ -139,6 +140,7 @@ export default function App() {
   const sanitizeUsersList = (savedList: any): UserAccount[] => {
     const baseList = Array.isArray(savedList) ? savedList : [];
     const candidateList = [...INITIAL_USERS, ...getUsersLedger(), ...baseList];
+    cleanupDeletedUserTombstonesAgainstActiveUsers(candidateList);
     const valid = deduplicateUsers(candidateList, getDeletedUserIds());
     return valid.length > 0 ? valid : INITIAL_USERS;
   };
@@ -463,13 +465,14 @@ export default function App() {
   }, [items, transactions, deletedTransactionIds, deletedLoanIds, employees, users, loans, auditLogs, rolePermissions, dashboardConfig, currentUser]);
 
   // Helper to immediately push authoritative state to Cloud Firestore
-  const syncToCloud = (overrides?: Partial<WarehouseSyncPayload>) => {
+  const syncToCloud = async (overrides?: Partial<WarehouseSyncPayload>): Promise<WarehouseSyncPayload | null> => {
     const current = latestStateRef.current;
     const payload: Partial<WarehouseSyncPayload> & { updatedBy: string } = {
       items: overrides?.items !== undefined ? overrides.items : current.items,
       transactions: overrides?.transactions !== undefined ? overrides.transactions : current.transactions,
       deletedTransactionIds: overrides?.deletedTransactionIds !== undefined ? overrides.deletedTransactionIds : current.deletedTransactionIds,
       deletedLoanIds: overrides?.deletedLoanIds !== undefined ? overrides.deletedLoanIds : current.deletedLoanIds,
+      deletedUserIds: overrides?.deletedUserIds !== undefined ? overrides.deletedUserIds : getDeletedUserIds(),
       employees: overrides?.employees !== undefined ? overrides.employees : current.employees,
       users: overrides?.users !== undefined ? overrides.users : current.users,
       loans: overrides?.loans !== undefined ? overrides.loans : current.loans,
@@ -478,9 +481,12 @@ export default function App() {
       dashboardConfig: overrides?.dashboardConfig !== undefined ? overrides.dashboardConfig : current.dashboardConfig,
       updatedBy: current.currentUser?.fullName || 'Sistem',
     };
-    pushWarehouseSync(payload).catch((err) => {
+    try {
+      return await pushWarehouseSync(payload);
+    } catch (err: any) {
       console.warn('Immediate Firestore sync error:', err?.message);
-    });
+      return null;
+    }
   };
 
   // Offline queue indicator state
@@ -516,7 +522,15 @@ export default function App() {
     if (Array.isArray(merged.deletedTransactionIds)) setDeletedTransactionIds(merged.deletedTransactionIds);
     if (Array.isArray(merged.deletedLoanIds)) setDeletedLoanIds(merged.deletedLoanIds);
     if (Array.isArray(merged.employees)) setEmployees(merged.employees);
-    if (Array.isArray(merged.users)) setUsers(sanitizeUsersList(merged.users));
+    if (Array.isArray(merged.users)) {
+      const sanitizedUsers = sanitizeUsersList(merged.users);
+      setUsers(sanitizedUsers);
+      try {
+        localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(sanitizedUsers));
+      } catch (e) {
+        console.error('Save users error', e);
+      }
+    }
     if (Array.isArray(merged.loans)) setLoans(merged.loans);
     if (Array.isArray(merged.auditLogs)) setAuditLogs(merged.auditLogs);
     if (merged.rolePermissions) setRolePermissions(merged.rolePermissions);
@@ -857,7 +871,7 @@ export default function App() {
     showToast(`Aktif sebagai ${user.fullName} [${user.role.replace('_', ' ')}]`, 'info');
   };
 
-  const handleAddUser = (newUser: UserAccount) => {
+  const handleAddUser = async (newUser: UserAccount) => {
     // Clear any previous tombstone for this user ID, username, and full name
     clearDeletedUserTombstone(newUser.id, newUser.username, newUser.fullName);
 
@@ -885,12 +899,15 @@ export default function App() {
       console.error('Save users error', e);
     }
 
-    syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
     logAudit('Tambah Akun Pengguna', 'USERS', `Membuat akun ${userToSave.fullName} (@${cleanUsername})`);
-    showToast(`Pengguna baru "${userToSave.fullName}" (@${cleanUsername}) berhasil didaftarkan & disinkronkan ke Cloud!`, 'success');
+
+    // Await cloud sync so the network write completes to Firestore BEFORE the modal closes!
+    await syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
+
+    showToast(`Pengguna baru "${userToSave.fullName}" (@${cleanUsername}) berhasil didaftarkan & tersimpan aman di Cloud!`, 'success');
   };
 
-  const handleUpdateUser = (updatedUser: UserAccount) => {
+  const handleUpdateUser = async (updatedUser: UserAccount) => {
     const cleanUsername = updatedUser.username.toLowerCase().trim().replace(/^@/, '');
     const userToSave = { ...updatedUser, username: cleanUsername };
 
@@ -920,12 +937,12 @@ export default function App() {
       }
     }
 
-    syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
     logAudit('Update Akun Pengguna', 'USERS', `Memperbarui profil ${userToSave.fullName}`);
+    await syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
     showToast(`Data akun "${userToSave.fullName}" (@${cleanUsername}) berhasil diperbarui & disinkronkan!`, 'info');
   };
 
-  const handleDeleteUser = (userId: string) => {
+  const handleDeleteUser = async (userId: string) => {
     const userToDel = users.find((u) => u.id === userId);
     if (!userToDel) {
       showToast('Akun pengguna tidak ditemukan atau sudah dihapus.', 'warning');
@@ -954,9 +971,9 @@ export default function App() {
       console.error('Save users error', e);
     }
 
-    syncToCloud({ users: dedupedUsers, deletedUserIds: nextDeletedUserIds });
     logAudit('Hapus Akun Pengguna', 'USERS', `Menghapus akun ${userToDel.fullName} (@${userToDel.username})`);
-    showToast(`Akun "${userToDel.fullName}" (@${userToDel.username}) berhasil dihapus secara permanen.`, 'success');
+    await syncToCloud({ users: dedupedUsers, deletedUserIds: nextDeletedUserIds });
+    showToast(`Akun "${userToDel.fullName}" (@${userToDel.username}) berhasil dihapus secara permanen.`, 'warning');
   };
 
   // Dashboard Settings operations

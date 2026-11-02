@@ -176,7 +176,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   const findMatchingUser = (accountList: UserAccount[], inputIdent: string): UserAccount | undefined => {
     const cleanIdent = inputIdent.trim().toLowerCase().replace(/^@/, '');
-    const combinedAccounts = deduplicateUsers([...accountList, ...getUsersLedger(), ...INITIAL_USERS], getDeletedUserIds());
+    const candidateAccounts = [...accountList, ...getUsersLedger(), ...INITIAL_USERS];
+    cleanupDeletedUserTombstonesAgainstActiveUsers(candidateAccounts);
+    const combinedAccounts = deduplicateUsers(candidateAccounts, getDeletedUserIds());
 
     // 1. Exact username match (Highest Priority)
     let matched = combinedAccounts.find((u) => {

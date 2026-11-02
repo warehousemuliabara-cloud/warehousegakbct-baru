@@ -136,6 +136,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Form states
   const [username, setUsername] = useState('');
@@ -268,6 +269,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       createdAt: new Date().toISOString(),
     };
 
+    setIsSaving(true);
     try {
       await onAddUser(newUser);
       setUsername('');
@@ -276,6 +278,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       setIsAdding(false);
     } catch (err: any) {
       setFormError('Gagal mendaftarkan akun: ' + (err?.message || 'Terjadi kesalahan'));
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -301,6 +305,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     const existing = users.find((u) => u.id === userId);
     if (!existing) return;
 
+    setIsSaving(true);
     try {
       await onUpdateUser({
         ...existing,
@@ -314,6 +319,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       setEditingUserId(null);
     } catch (err: any) {
       setFormError('Gagal memperbarui akun: ' + (err?.message || 'Terjadi kesalahan'));
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -757,9 +764,13 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                     </button>
                     <button
                       type="submit"
-                      className="px-4 py-1.5 text-xs font-black text-slate-950 bg-amber-500 hover:bg-amber-400 rounded-xl shadow-xs cursor-pointer"
+                      disabled={isSaving}
+                      className={`px-4 py-1.5 text-xs font-black text-slate-950 rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5 transition-all ${
+                        isSaving ? 'bg-amber-300 opacity-80 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-400'
+                      }`}
                     >
-                      Simpan Akun
+                      {isSaving && <RotateCcw className="w-3.5 h-3.5 animate-spin" />}
+                      <span>{isSaving ? 'Menyimpan & Menyinkronkan...' : 'Simpan Akun'}</span>
                     </button>
                   </div>
                 </form>
@@ -864,10 +875,14 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                           </button>
                           <button
                             type="button"
+                            disabled={isSaving}
                             onClick={() => handleSaveEdit(user.id)}
-                            className="px-4 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-xs cursor-pointer"
+                            className={`px-4 py-1 text-white text-xs font-bold rounded-lg shadow-xs cursor-pointer flex items-center gap-1.5 transition-all ${
+                              isSaving ? 'bg-blue-400 opacity-80 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                            }`}
                           >
-                            Simpan Perubahan
+                            {isSaving && <RotateCcw className="w-3.5 h-3.5 animate-spin" />}
+                            <span>{isSaving ? 'Menyimpan...' : 'Simpan Perubahan'}</span>
                           </button>
                         </div>
                       </div>
