@@ -693,31 +693,8 @@ export function clearDeletedUserTombstone(userId?: string, username?: string, fu
   }
 }
 
-export function cleanupDeletedUserTombstonesAgainstActiveUsers(activeUsers: any[]) {
-  if (typeof window === 'undefined' || !Array.isArray(activeUsers)) return;
-  try {
-    const activeKeys = new Set<string>();
-    activeUsers.forEach((u) => {
-      if (!u || typeof u !== 'object') return;
-      if (u.id) activeKeys.add(String(u.id).toLowerCase().trim());
-      if (u.username) {
-        const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
-        activeKeys.add(cleanU);
-        activeKeys.add(`@${cleanU}`);
-      }
-      if (u.fullName) activeKeys.add(String(u.fullName).toLowerCase().trim());
-    });
-
-    const current = getDeletedUserIds();
-    const filteredTombstones = current.filter((t) => {
-      const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
-      return !activeKeys.has(cleanT);
-    });
-
-    localStorage.setItem(STORAGE_KEY_DELETED_USERS, JSON.stringify(filteredTombstones));
-  } catch (e) {
-    // safe
-  }
+export function cleanupDeletedUserTombstonesAgainstActiveUsers(_activeUsers: any[]) {
+  // No-op: keep deleted user tombstones permanent so deleted accounts never reappear
 }
 
 const STORAGE_KEY_USERS_LEDGER = 'ga_warehouse_users_ledger_v1';
@@ -1390,22 +1367,7 @@ export function smartMergeWarehouseData(
   ];
 
   // Purge any tombstones for accounts that are actively present
-  const activeUserKeys = new Set<string>();
-  candidateUsers.forEach((u: any) => {
-    if (!u || typeof u !== 'object') return;
-    if (u.id) activeUserKeys.add(String(u.id).toLowerCase().trim());
-    if (u.username) {
-      const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
-      activeUserKeys.add(cleanU);
-      activeUserKeys.add(`@${cleanU}`);
-    }
-    if (u.fullName) activeUserKeys.add(String(u.fullName).toLowerCase().trim());
-  });
-
-  const allDeletedUserIds = rawDeletedUserIds.filter((t) => {
-    const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
-    return !activeUserKeys.has(cleanT);
-  });
+  const allDeletedUserIds = rawDeletedUserIds;
 
   if (typeof window !== 'undefined') {
     try {
@@ -1735,22 +1697,7 @@ export async function pushWarehouseSync(
     ...(payload.deletedUserIds || []),
   ])).slice(-500);
 
-  const activeUserKeys = new Set<string>();
-  rawUsersToPush.forEach((u: any) => {
-    if (!u || typeof u !== 'object') return;
-    if (u.id) activeUserKeys.add(String(u.id).toLowerCase().trim());
-    if (u.username) {
-      const cleanU = String(u.username).toLowerCase().trim().replace(/^@/, '');
-      activeUserKeys.add(cleanU);
-      activeUserKeys.add(`@${cleanU}`);
-    }
-    if (u.fullName) activeUserKeys.add(String(u.fullName).toLowerCase().trim());
-  });
-
-  const deletedUserIds = rawDeletedUserIds.filter((t) => {
-    const cleanT = String(t).toLowerCase().trim().replace(/^@/, '');
-    return !activeUserKeys.has(cleanT);
-  });
+  const deletedUserIds = rawDeletedUserIds;
 
   const allDeletedUserSet = new Set(deletedUserIds.map((s) => String(s).toLowerCase().trim().replace(/^@/, '')));
 
