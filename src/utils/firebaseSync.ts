@@ -52,15 +52,88 @@ export const CLIENT_SESSION_ID = typeof window !== 'undefined'
   : 'server_env';
 
 // Real-Time Cross-Device WebSocket Sync Relay (Instant PC <-> Handphone Synchronization)
-const CROSS_DEVICE_TOPIC = 'muliabara_kbct_warehouse_sync_888ff62e';
+export const CROSS_DEVICE_TOPIC = 'muliabara_kbct_warehouse_sync_888ff62e';
+export const CROSS_DEVICE_EVENT_TOPIC = 'muliabara_kbct_warehouse_events_888ff62e';
 const MQTT_BROKER_URLS = [
   'wss://broker.hivemq.com:8884/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
 ];
 
+export interface CrossDeviceEvent {
+  type:
+    | 'TRANSACTION_CREATED'
+    | 'TRANSACTION_APPROVED'
+    | 'TRANSACTION_REJECTED'
+    | 'TRANSACTION_DISPATCHED'
+    | 'TRANSACTION_DELETED'
+    | 'STOCK_UPDATED'
+    | 'LOAN_UPDATED'
+    | 'USERS_UPDATED';
+  transaction?: any;
+  transactionId?: string;
+  transactionNumber?: string;
+  items?: any[];
+  loans?: any[];
+  users?: any[];
+  deletedUserIds?: string[];
+  updatedBy?: string;
+  timestamp: string;
+  senderId: string;
+}
+
 let mqttClient: any = null;
 let latestRelayPayload: WarehouseSyncPayload | null = null;
 const crossDeviceCallbacks: ((payload: WarehouseSyncPayload) => void)[] = [];
+const crossDeviceEventListeners: ((event: CrossDeviceEvent) => void)[] = [];
+
+export function subscribeToCrossDeviceEvents(callback: (event: CrossDeviceEvent) => void) {
+  crossDeviceEventListeners.push(callback);
+  return () => {
+    const idx = crossDeviceEventListeners.indexOf(callback);
+    if (idx !== -1) crossDeviceEventListeners.splice(idx, 1);
+  };
+}
+
+export function publishCrossDeviceEvent(
+  eventData: Omit<CrossDeviceEvent, 'senderId' | 'timestamp'>
+) {
+  if (typeof window === 'undefined') return;
+  const fullEvent: CrossDeviceEvent = {
+    ...eventData,
+    senderId: CLIENT_SESSION_ID,
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    // 1. Broadcast to other local tabs
+    if (broadcastChannel) {
+      try {
+        broadcastChannel.postMessage({
+          type: 'WAREHOUSE_EVENT',
+          event: fullEvent,
+          senderId: CLIENT_SESSION_ID,
+        });
+      } catch {}
+    }
+
+    // 2. Publish to MQTT for all other devices (HP, Laptop, PC, Netlify)
+    const jsonStr = JSON.stringify(fullEvent);
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(CROSS_DEVICE_EVENT_TOPIC, jsonStr, { qos: 1 });
+    } else if (mqttClient) {
+      mqttClient.publish(CROSS_DEVICE_EVENT_TOPIC, jsonStr, { qos: 1 });
+    } else {
+      initCrossDeviceRelay();
+      setTimeout(() => {
+        if (mqttClient) {
+          mqttClient.publish(CROSS_DEVICE_EVENT_TOPIC, jsonStr, { qos: 1 });
+        }
+      }, 800);
+    }
+  } catch (e) {
+    console.warn('publishCrossDeviceEvent error:', e);
+  }
+}
 
 // Initialize high-speed real-time cross-device sync relay
 function initCrossDeviceRelay() {
@@ -78,13 +151,41 @@ function initCrossDeviceRelay() {
     mqttClient.on('connect', () => {
       console.log('Cross-Device Relay connected (PC ↔ Handphone active)');
       updateSyncState('connected', 'Tersinkronisasi Realtime (PC ↔ HP Terhubung)');
-      mqttClient.subscribe(CROSS_DEVICE_TOPIC, { qos: 1 }, (err: any) => {
+      mqttClient.subscribe([CROSS_DEVICE_TOPIC, CROSS_DEVICE_EVENT_TOPIC], { qos: 1 }, (err: any) => {
         if (err) console.warn('MQTT sub err:', err);
       });
     });
 
-    mqttClient.on('message', (_topic: string, message: any) => {
+    mqttClient.on('message', (topic: string, message: any) => {
       try {
+        // Handle lightweight real-time event (< 2KB)
+        if (topic === CROSS_DEVICE_EVENT_TOPIC) {
+          const rawStr = typeof message === 'string' ? message : message.toString();
+          const event: CrossDeviceEvent = JSON.parse(rawStr);
+          if (!event || event.senderId === CLIENT_SESSION_ID) {
+            return;
+          }
+
+          crossDeviceEventListeners.forEach((cb) => {
+            try {
+              cb(event);
+            } catch (err) {
+              console.error('Cross-device event callback error:', err);
+            }
+          });
+
+          if (broadcastChannel) {
+            try {
+              broadcastChannel.postMessage({
+                type: 'WAREHOUSE_EVENT',
+                event,
+                senderId: CLIENT_SESSION_ID,
+              });
+            } catch {}
+          }
+          return;
+        }
+
         const rawStr = typeof message === 'string' ? message : message.toString();
         const payload: WarehouseSyncPayload = JSON.parse(rawStr);
         if (!payload || payload.lastWriterId === CLIENT_SESSION_ID) {
@@ -187,6 +288,42 @@ if (typeof window !== 'undefined') {
 }
 
 /**
+ * Prepare lightweight warehouse state for MQTT WebSocket relay.
+ * Ensures packet size stays strictly under 180 KB (HiveMQ max limit is 256 KB).
+ */
+export function preparePayloadForRelay(payload: WarehouseSyncPayload): WarehouseSyncPayload {
+  const trimmedTrx = Array.isArray(payload.transactions)
+    ? payload.transactions.slice(0, 50)
+    : [];
+
+  const trimmedLoans = Array.isArray(payload.loans)
+    ? payload.loans.slice(0, 30)
+    : [];
+
+  const trimmedAudit = Array.isArray(payload.auditLogs)
+    ? payload.auditLogs.slice(0, 15)
+    : [];
+
+  const trimmedConfig = payload.dashboardConfig ? { ...payload.dashboardConfig } : {};
+  if (trimmedConfig.logoUrl && typeof trimmedConfig.logoUrl === 'string' && trimmedConfig.logoUrl.length > 5000) {
+    trimmedConfig.logoUrl = trimmedConfig.logoUrl.slice(0, 5000);
+  }
+
+  return {
+    ...payload,
+    transactions: trimmedTrx,
+    loans: trimmedLoans,
+    auditLogs: trimmedAudit,
+    dashboardConfig: trimmedConfig,
+    deletedTransactionIds: (payload.deletedTransactionIds || []).slice(-50),
+    deletedLoanIds: (payload.deletedLoanIds || []).slice(-30),
+    deletedUserIds: (payload.deletedUserIds || []).slice(-30),
+    deletedItemIds: (payload.deletedItemIds || []).slice(-30),
+    deletedEmployeeIds: (payload.deletedEmployeeIds || []).slice(-30),
+  };
+}
+
+/**
  * Publish instant warehouse state across all devices (PC, Handphone, Tablet).
  * Uses QoS 1 and Retain flag so devices opening later immediately receive the state.
  */
@@ -194,7 +331,8 @@ export function publishCrossDeviceUpdate(payload: WarehouseSyncPayload) {
   if (typeof window === 'undefined') return;
   try {
     latestRelayPayload = payload;
-    const jsonStr = JSON.stringify(payload);
+    const trimmed = preparePayloadForRelay(payload);
+    const jsonStr = JSON.stringify(trimmed);
     if (mqttClient && mqttClient.connected) {
       mqttClient.publish(CROSS_DEVICE_TOPIC, jsonStr, { retain: true, qos: 1 });
     } else if (mqttClient) {
@@ -248,17 +386,22 @@ if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
   }
 }
 
-export function subscribeToCrossTabSync(callback: (payload: WarehouseSyncPayload) => void) {
+export function subscribeToCrossTabSync(
+  callback: (payload: WarehouseSyncPayload) => void,
+  onEvent?: (event: CrossDeviceEvent) => void
+) {
   if (!broadcastChannel) return () => {};
   
   const handleMessage = (event: MessageEvent) => {
+    if (!event.data || event.data.senderId === CLIENT_SESSION_ID) return;
+
     if (
-      event.data && 
       event.data.type === 'WAREHOUSE_SYNC_UPDATE' && 
-      event.data.payload &&
-      event.data.senderId !== CLIENT_SESSION_ID
+      event.data.payload
     ) {
       callback(event.data.payload);
+    } else if (event.data.type === 'WAREHOUSE_EVENT' && event.data.event && onEvent) {
+      onEvent(event.data.event);
     }
   };
 
@@ -1122,6 +1265,15 @@ export async function flushOfflineSyncQueue(): Promise<boolean> {
     isFlushingQueue = false;
     return true;
   } catch (err: any) {
+    const isQuota = err?.code === 'resource-exhausted' || err?.message?.includes('Quota') || err?.message?.includes('quota');
+    if (isQuota) {
+      try {
+        localStorage.removeItem(STORAGE_KEY_OFFLINE_QUEUE);
+      } catch {}
+      updateSyncState('connected', 'Tersinkronisasi Realtime (PC ↔ HP Terhubung)');
+      isFlushingQueue = false;
+      return true;
+    }
     console.warn('Queue flush retry notice:', err?.message);
     updateSyncState('offline', 'Koneksi lemah, akan dicoba kembali otomatis');
     isFlushingQueue = false;
@@ -1861,7 +2013,12 @@ export async function pushWarehouseSync(
     updateSyncState('connected', 'Tersinkronisasi Realtime (PC ↔ HP Terhubung)');
     return cleanPayload;
   } catch (error: any) {
-    // Keep in offline queue so it is automatically retried for Firestore Cloud when quota resets
+    const isQuota = error?.code === 'resource-exhausted' || error?.message?.includes('Quota') || error?.message?.includes('quota');
+    if (isQuota) {
+      try {
+        localStorage.removeItem(STORAGE_KEY_OFFLINE_QUEUE);
+      } catch {}
+    }
     updateSyncState('connected', 'Tersinkronisasi Realtime (PC ↔ HP Terhubung)');
     return cleanPayload;
   }

@@ -115,7 +115,10 @@ import {
   isItemDeleted,
   recordDeletedUserId,
   SyncState,
-  WarehouseSyncPayload 
+  WarehouseSyncPayload,
+  subscribeToCrossDeviceEvents,
+  publishCrossDeviceEvent,
+  CrossDeviceEvent 
 } from './utils/firebaseSync';
 import { playNotificationChime, triggerBrowserNotification } from './utils/helpers';
 import { 
@@ -580,12 +583,196 @@ export default function App() {
     return () => unsubscribeSync();
   }, []);
 
-  // 1. Subscribe to instant cross-tab broadcast (0ms multi-account sync e.g. Wardhana -> Master Admin)
-  useEffect(() => {
-    const unsubscribeCrossTab = subscribeToCrossTabSync((incomingData) => {
-      if (incomingData) {
-        applySafeCloudData(incomingData);
+  // Handle high-speed real-time event broadcasts across devices & accounts
+  const handleIncomingCrossDeviceEvent = (event: CrossDeviceEvent) => {
+    if (!event || !event.type) return;
+
+    if (event.type === 'TRANSACTION_CREATED' && event.transaction) {
+      const trx = event.transaction;
+      saveToLocalLedger(trx);
+
+      setTransactions((prev) => {
+        const exists = prev.some(
+          (t) => (t.id && t.id === trx.id) || (t.transactionNumber && t.transactionNumber === trx.transactionNumber)
+        );
+        if (exists) {
+          return prev.map((t) =>
+            ((t.id && t.id === trx.id) || (t.transactionNumber && t.transactionNumber === trx.transactionNumber)) ? trx : t
+          );
+        }
+        const updated = [trx, ...prev];
+        try {
+          localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+
+      if (Array.isArray(event.items) && event.items.length > 0) {
+        const sanitizedItems = sanitizeItemsList(event.items);
+        setItems(sanitizedItems);
+        try {
+          localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(sanitizedItems));
+        } catch {}
       }
+
+      playNotificationChime();
+
+      if (trx.type === 'OUT' && trx.status === 'PENDING') {
+        const notifTitle = '🔔 Pengajuan Permintaan Barang Baru';
+        const notifBody = `${trx.transactionNumber} diajukan oleh ${trx.requesterName || 'Karyawan'} (${trx.department || 'Umum'}) - Menunggu Approval Admin di menu Permintaan.`;
+        triggerBrowserNotification(notifTitle, notifBody);
+        showToast(`🔔 Permintaan baru [${trx.transactionNumber}] oleh ${trx.requesterName} (Menunggu Approval di menu Permintaan)`, 'info');
+      } else if (trx.type === 'IN') {
+        const notifTitle = '📥 Barang Masuk Baru Tercatat';
+        const notifBody = `${trx.transactionNumber} dari ${trx.supplier || 'Vendor'} (${trx.items?.length || 0} item)`;
+        triggerBrowserNotification(notifTitle, notifBody);
+        showToast(`📥 [${trx.transactionNumber}] penerimaan barang masuk resmi dicatat di Riwayat Transaksi.`, 'success');
+      } else if (trx.type === 'OUT' && trx.status === 'COMPLETED') {
+        const notifTitle = '📤 Transaksi Barang Keluar Selesai';
+        const notifBody = `${trx.transactionNumber} untuk ${trx.requesterName} (${trx.department})`;
+        triggerBrowserNotification(notifTitle, notifBody);
+        showToast(`📤 [${trx.transactionNumber}] transaksi barang keluar selesai & tercatat di Riwayat Transaksi.`, 'success');
+      }
+    } else if (event.type === 'TRANSACTION_APPROVED' && event.transaction) {
+      const trx = event.transaction;
+      saveToLocalLedger(trx);
+      setTransactions((prev) => {
+        const updated = prev.map((t) =>
+          ((t.id && t.id === trx.id) || (t.transactionNumber && t.transactionNumber === trx.transactionNumber))
+            ? { ...t, ...trx, status: 'APPROVED' as const }
+            : t
+        );
+        try {
+          localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      playNotificationChime();
+      triggerBrowserNotification(
+        '✅ Permintaan Disetujui Admin',
+        `${trx.transactionNumber} telah disetujui. Siap untuk serah terima fisik barang.`
+      );
+      showToast(`✅ Permintaan [${trx.transactionNumber}] disetujui Admin. Siap serah terima fisik.`, 'info');
+    } else if (event.type === 'TRANSACTION_DISPATCHED' && event.transaction) {
+      const trx = event.transaction;
+      saveToLocalLedger(trx);
+      setTransactions((prev) => {
+        const updated = prev.map((t) =>
+          ((t.id && t.id === trx.id) || (t.transactionNumber && t.transactionNumber === trx.transactionNumber))
+            ? { ...t, ...trx, status: 'COMPLETED' as const }
+            : t
+        );
+        try {
+          localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      if (Array.isArray(event.items) && event.items.length > 0) {
+        const sanitizedItems = sanitizeItemsList(event.items);
+        setItems(sanitizedItems);
+        try {
+          localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(sanitizedItems));
+        } catch {}
+      }
+      playNotificationChime();
+      triggerBrowserNotification(
+        '📦 Serah Terima Fisik Barang Selesai',
+        `Barang [${trx.transactionNumber}] telah diserahkan fisik & resmi tercatat pada Riwayat Transaksi Keluar.`
+      );
+      showToast(`📦 [${trx.transactionNumber}] serah terima fisik selesai! Resmi masuk ke Riwayat Transaksi Keluar.`, 'success');
+    } else if (event.type === 'TRANSACTION_REJECTED' && event.transaction) {
+      const trx = event.transaction;
+      setTransactions((prev) => {
+        const updated = prev.map((t) =>
+          ((t.id && t.id === trx.id) || (t.transactionNumber && t.transactionNumber === trx.transactionNumber))
+            ? { ...t, ...trx, status: 'REJECTED' as const }
+            : t
+        );
+        try {
+          localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      showToast(`Permintaan [${trx.transactionNumber}] ditolak.`, 'warning');
+    } else if (event.type === 'TRANSACTION_DELETED' && (event.transactionId || event.transactionNumber)) {
+      const tId = event.transactionId || '';
+      const tNum = event.transactionNumber || '';
+      recordDeletedTransactionId(tId, tNum);
+      removeFromLocalLedger(tId, tNum);
+      const nextDeletedIds = getDeletedTransactionIds();
+      setDeletedTransactionIds(nextDeletedIds);
+      setTransactions((prev) => {
+        const updated = prev.filter((t) => t.id !== tId && t.transactionNumber !== tNum);
+        try {
+          localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      if (Array.isArray(event.items) && event.items.length > 0) {
+        const sanitizedItems = sanitizeItemsList(event.items);
+        setItems(sanitizedItems);
+        try {
+          localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(sanitizedItems));
+        } catch {}
+      }
+      showToast(`Transaksi [${tNum || tId}] telah dihapus.`, 'info');
+    } else if (event.type === 'USERS_UPDATED') {
+      if (Array.isArray(event.users) && event.users.length > 0) {
+        const incomingDeleted = event.deletedUserIds || getDeletedUserIds();
+        const deduped = deduplicateUsers([...getUsersLedger(), ...event.users], incomingDeleted);
+        setUsers(deduped);
+        try {
+          localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify(deduped));
+        } catch {}
+        if (currentUser) {
+          const cleanCur = currentUser.username.toLowerCase().trim().replace(/^@/, '');
+          const found = deduped.find((u) => u.id === currentUser.id || u.username.toLowerCase().trim().replace(/^@/, '') === cleanCur);
+          if (found) {
+            setCurrentUser(found);
+            try {
+              localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(found));
+            } catch {}
+          }
+        }
+      }
+    } else if (event.type === 'STOCK_UPDATED' && Array.isArray(event.items)) {
+      const sanitizedItems = sanitizeItemsList(event.items);
+      setItems(sanitizedItems);
+      try {
+        localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(sanitizedItems));
+      } catch {}
+    } else if (event.type === 'LOAN_UPDATED') {
+      if (Array.isArray(event.loans)) {
+        setLoans(event.loans);
+        try {
+          localStorage.setItem(STORAGE_KEY_LOANS, JSON.stringify(event.loans));
+        } catch {}
+      }
+      if (Array.isArray(event.items) && event.items.length > 0) {
+        const sanitizedItems = sanitizeItemsList(event.items);
+        setItems(sanitizedItems);
+        try {
+          localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(sanitizedItems));
+        } catch {}
+      }
+    }
+  };
+
+  // 1. Subscribe to instant cross-tab and cross-device event broadcast (PC ↔ Handphone ↔ Netlify)
+  useEffect(() => {
+    const unsubscribeCrossTab = subscribeToCrossTabSync(
+      (incomingData) => {
+        if (incomingData) {
+          applySafeCloudData(incomingData);
+        }
+      },
+      (event) => {
+        handleIncomingCrossDeviceEvent(event);
+      }
+    );
+
+    const unsubscribeEvents = subscribeToCrossDeviceEvents((event) => {
+      handleIncomingCrossDeviceEvent(event);
     });
 
     // Initial cloud fetch on startup to establish connection & pull/merge latest cloud transactions
@@ -617,6 +804,7 @@ export default function App() {
 
     return () => {
       unsubscribeCrossTab();
+      unsubscribeEvents();
     };
   }, []);
 
@@ -901,6 +1089,13 @@ export default function App() {
 
     logAudit('Tambah Akun Pengguna', 'USERS', `Membuat akun ${userToSave.fullName} (@${cleanUsername})`);
 
+    publishCrossDeviceEvent({
+      type: 'USERS_UPDATED',
+      users: nextUsers,
+      deletedUserIds: nextDeletedUserIds,
+      updatedBy: currentUser.fullName,
+    });
+
     // Await cloud sync so the network write completes to Firestore BEFORE the modal closes!
     await syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
 
@@ -938,6 +1133,14 @@ export default function App() {
     }
 
     logAudit('Update Akun Pengguna', 'USERS', `Memperbarui profil ${userToSave.fullName}`);
+
+    publishCrossDeviceEvent({
+      type: 'USERS_UPDATED',
+      users: nextUsers,
+      deletedUserIds: nextDeletedUserIds,
+      updatedBy: currentUser.fullName,
+    });
+
     await syncToCloud({ users: nextUsers, deletedUserIds: nextDeletedUserIds });
     showToast(`Data akun "${userToSave.fullName}" (@${cleanUsername}) berhasil diperbarui & disinkronkan!`, 'info');
   };
@@ -972,6 +1175,14 @@ export default function App() {
     }
 
     logAudit('Hapus Akun Pengguna', 'USERS', `Menghapus akun ${userToDel.fullName} (@${userToDel.username})`);
+
+    publishCrossDeviceEvent({
+      type: 'USERS_UPDATED',
+      users: dedupedUsers,
+      deletedUserIds: nextDeletedUserIds,
+      updatedBy: currentUser.fullName,
+    });
+
     await syncToCloud({ users: dedupedUsers, deletedUserIds: nextDeletedUserIds });
     showToast(`Akun "${userToDel.fullName}" (@${userToDel.username}) berhasil dihapus secara permanen.`, 'warning');
   };
@@ -1096,6 +1307,11 @@ export default function App() {
     try {
       localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
     } catch {}
+    publishCrossDeviceEvent({
+      type: 'STOCK_UPDATED',
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
     syncToCloud({ items: nextItems });
     logAudit('Tambah Master Barang', 'STOCK', `Menambahkan barang "${newItem.name}" (${newItem.code}) stok awal: ${newItem.currentStock} ${newItem.unit}`);
     showToast(`Barang baru "${newItem.name}" (${newItem.code}) berhasil ditambahkan & disinkronkan!`, 'success');
@@ -1109,6 +1325,11 @@ export default function App() {
       try {
         localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
       } catch {}
+      publishCrossDeviceEvent({
+        type: 'STOCK_UPDATED',
+        items: nextItems,
+        updatedBy: currentUser.fullName,
+      });
       syncToCloud({ items: nextItems });
       logAudit('Import Excel (Replace)', 'STOCK', `Mengganti seluruh katalog dengan ${newItems.length} barang baru`);
       showToast(`Berhasil mengimpor ${newItems.length} data barang (semua diganti)!`, 'success');
@@ -1120,6 +1341,11 @@ export default function App() {
       try {
         localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
       } catch {}
+      publishCrossDeviceEvent({
+        type: 'STOCK_UPDATED',
+        items: nextItems,
+        updatedBy: currentUser.fullName,
+      });
       syncToCloud({ items: nextItems });
       logAudit('Import Excel (Append)', 'STOCK', `Menambahkan ${newItems.length} data barang dari Excel/CSV`);
       showToast(`Berhasil mengimpor ${newItems.length} data barang baru!`, 'success');
@@ -1132,6 +1358,11 @@ export default function App() {
     try {
       localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
     } catch {}
+    publishCrossDeviceEvent({
+      type: 'STOCK_UPDATED',
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
     syncToCloud({ items: nextItems });
     logAudit('Update Master Barang', 'STOCK', `Memperbarui item ${updated.name} (${updated.code})`);
     showToast(`Data barang "${updated.name}" berhasil diperbarui.`, 'info');
@@ -1148,6 +1379,11 @@ export default function App() {
     try {
       localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
     } catch {}
+    publishCrossDeviceEvent({
+      type: 'STOCK_UPDATED',
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
     syncToCloud({ items: nextItems, deletedItemIds: nextDeletedIds });
     logAudit('Hapus Master Barang', 'STOCK', `Menghapus item ${deleted?.name || itemId} (${deleted?.code})`);
     showToast(`Barang "${deleted?.name || itemId}" telah dihapus.`, 'warning');
@@ -1323,10 +1559,19 @@ export default function App() {
     const nextTrx = [finalTrx, ...transactions];
     setTransactions(nextTrx);
 
-    // Save permanently to local ledger immediately only if officially completed (not pending approval)
-    if (!isPendingApproval) {
-      saveToLocalLedger(finalTrx);
-    }
+    // Save permanently to local ledger immediately so it is NEVER lost (both PENDING and COMPLETED)
+    saveToLocalLedger(finalTrx);
+    try {
+      localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(nextTrx));
+    } catch {}
+
+    // Instant real-time MQTT broadcast to all other devices & accounts (< 1 KB payload)
+    publishCrossDeviceEvent({
+      type: 'TRANSACTION_CREATED',
+      transaction: finalTrx,
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
 
     // Broadcast immediately to Firestore so other phones/devices see it instantly!
     syncToCloud({ items: nextItems, transactions: nextTrx });
@@ -1360,15 +1605,16 @@ export default function App() {
     }
   };
 
-  // Approval Handlers with immediate Cloud sync
+  // Approval Handlers with immediate Cloud & Cross-Device sync
   const handleApproveRequest = (trxId: string, notes?: string) => {
     const trx = transactions.find(t => t.id === trxId);
     if (!trx) return;
 
     const nowIso = new Date().toISOString();
+    let approvedTrxObj: Transaction | undefined;
     const nextTrx = transactions.map(t => {
       if (t.id === trxId) {
-        return {
+        approvedTrxObj = {
           ...t,
           status: 'APPROVED' as const,
           updatedAt: nowIso,
@@ -1380,11 +1626,25 @@ export default function App() {
             notes
           }
         };
+        return approvedTrxObj;
       }
       return t;
     });
 
     setTransactions(nextTrx);
+    try {
+      localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(nextTrx));
+    } catch {}
+
+    if (approvedTrxObj) {
+      saveToLocalLedger(approvedTrxObj);
+      publishCrossDeviceEvent({
+        type: 'TRANSACTION_APPROVED',
+        transaction: approvedTrxObj,
+        updatedBy: currentUser.fullName,
+      });
+    }
+
     syncToCloud({ transactions: nextTrx });
 
     logAudit('Approval Permintaan', 'USERS', `Admin menyetujui permohonan [${trx.transactionNumber}] (${trx.requesterName}). Menunggu serah terima fisik.`);
@@ -1396,9 +1656,10 @@ export default function App() {
     if (!trx) return;
 
     const nowIso = new Date().toISOString();
+    let rejectedTrxObj: Transaction | undefined;
     const nextTrx = transactions.map(t => {
       if (t.id === trxId) {
-        return {
+        rejectedTrxObj = {
           ...t,
           status: 'REJECTED' as const,
           updatedAt: nowIso,
@@ -1410,11 +1671,24 @@ export default function App() {
             notes: notes || 'Permintaan ditolak oleh Admin'
           }
         };
+        return rejectedTrxObj;
       }
       return t;
     });
 
     setTransactions(nextTrx);
+    try {
+      localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(nextTrx));
+    } catch {}
+
+    if (rejectedTrxObj) {
+      publishCrossDeviceEvent({
+        type: 'TRANSACTION_REJECTED',
+        transaction: rejectedTrxObj,
+        updatedBy: currentUser.fullName,
+      });
+    }
+
     syncToCloud({ transactions: nextTrx });
 
     logAudit('Penolakan Permintaan', 'TRANSACTIONS', `Admin menolak permintaan [${trx.transactionNumber}]: ${notes || '-'}`);
@@ -1436,25 +1710,38 @@ export default function App() {
       return item;
     });
     setItems(nextItems);
+    try {
+      localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
+    } catch {}
 
+    let dispatchedTrxObj: Transaction | undefined;
     const nextTrx = transactions.map(t => {
       if (t.id === trxId) {
-        return {
+        dispatchedTrxObj = {
           ...t,
           status: 'COMPLETED' as const,
           updatedAt: nowIso,
           dispatchedBy: currentUser.fullName,
           dispatchedAt: nowIso,
         };
+        return dispatchedTrxObj;
       }
       return t;
     });
     setTransactions(nextTrx);
+    try {
+      localStorage.setItem(STORAGE_KEY_TRANSACTIONS, JSON.stringify(nextTrx));
+    } catch {}
 
     // Save completed transaction to permanent local ledger
-    const completedTrx = nextTrx.find(t => t.id === trxId);
-    if (completedTrx) {
-      saveToLocalLedger(completedTrx);
+    if (dispatchedTrxObj) {
+      saveToLocalLedger(dispatchedTrxObj);
+      publishCrossDeviceEvent({
+        type: 'TRANSACTION_DISPATCHED',
+        transaction: dispatchedTrxObj,
+        items: nextItems,
+        updatedBy: currentUser.fullName,
+      });
     }
 
     syncToCloud({ items: nextItems, transactions: nextTrx });
@@ -1495,6 +1782,9 @@ export default function App() {
         return item;
       });
       setItems(nextItems);
+      try {
+        localStorage.setItem(STORAGE_KEY_ITEMS, JSON.stringify(nextItems));
+      } catch {}
     }
 
     // Record tombstone and remove from permanent local ledger so it can NEVER reappear
@@ -1510,6 +1800,14 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
+
+    publishCrossDeviceEvent({
+      type: 'TRANSACTION_DELETED',
+      transactionId: transactionId,
+      transactionNumber: trxToDelete.transactionNumber,
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
 
     syncToCloud({ items: nextItems, transactions: nextTrx, deletedTransactionIds: nextDeletedIds });
 
@@ -1796,6 +2094,13 @@ export default function App() {
     );
     setItems(nextItems);
 
+    publishCrossDeviceEvent({
+      type: 'LOAN_UPDATED',
+      loans: nextLoans,
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
+
     syncToCloud({ loans: nextLoans, items: nextItems });
     logAudit('Pinjam Barang', 'LOANS', `Peminjaman "${newLoan.itemName}" (${newLoan.quantity} ${newLoan.unit}) oleh ${newLoan.borrowerName}`);
     showToast(`Peminjaman barang [${newLoan.loanNumber}] berhasil dicatat!`, 'success');
@@ -1837,6 +2142,13 @@ export default function App() {
       );
       setItems(nextItems);
     }
+
+    publishCrossDeviceEvent({
+      type: 'LOAN_UPDATED',
+      loans: nextLoans,
+      items: nextItems,
+      updatedBy: currentUser.fullName,
+    });
 
     syncToCloud({ loans: nextLoans, items: nextItems });
     logAudit('Pengembalian Pinjaman', 'LOANS', `Pengembalian barang [${loan.loanNumber}] (${loan.itemName}) kondisi: ${condition}`);
